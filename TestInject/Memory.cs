@@ -1,5 +1,7 @@
 ﻿using System;
 using System.Collections;
+using System.Collections.Concurrent;
+using System.Collections.Generic;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Globalization;
@@ -10,6 +12,8 @@ using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Security;
 using System.Text;
+using System.Threading;
+using System.Threading.Tasks;
 
 namespace TestInject
 {
@@ -89,35 +93,8 @@ namespace TestInject
 				UpdateProcessInformation();
 
 				ProcessModule pm = default;
-				if (string.IsNullOrEmpty(processModule))
-				{
-					// Scan all process modules
-					// return first result
-
-					return 0;
-				}
-				else
-				{
-					pm = HostProcess.Modules.Cast<ProcessModule>().FirstOrDefault(x => string.Equals(x.ModuleName, processModule, StringComparison.CurrentCultureIgnoreCase));
-					if (pm == null)
-						return 0;
-				}
-
-				byte[] buffer = new byte[pm.ModuleMemorySize];
-				try
-				{
-					buffer = Reader.ReadBytes(pm.BaseAddress, (uint)pm.ModuleMemorySize);
-				}
-				catch
-				{
-					Console.WriteLine($"ReadBytes(location: 0x{pm.BaseAddress.ToInt32():X8}, numBytes: {buffer.Length}) failed ...");
-					return 0;
-				}
-
-				if (buffer == null || buffer.Length < 1) return 0;
 
 				var tmpSplitPattern = pattern.TrimStart(' ').TrimEnd(' ').Split(' ');
-
 				var tmpPattern = new byte[tmpSplitPattern.Length];
 				var tmpMask = new byte[tmpSplitPattern.Length];
 
@@ -151,6 +128,69 @@ namespace TestInject
 
 				if (tmpMask.Length != tmpPattern.Length)
 					throw new ArgumentException($"{nameof(pattern)}.Length != {nameof(tmpMask)}.Length");
+
+				if (string.IsNullOrEmpty(processModule))
+				{
+					ConcurrentQueue<ulong> results = new ConcurrentQueue<ulong>();
+					Parallel.ForEach(HostProcess.Modules.Cast<ProcessModule>(), (procModule, state) =>
+					{
+						if (results.Count > 0)
+							state.Break();
+
+						byte[] procModuleBuffer = new byte[procModule.ModuleMemorySize];
+
+						try
+						{
+							procModuleBuffer = Reader.ReadBytes(procModule.BaseAddress, (uint) procModule.ModuleMemorySize);
+						}
+						catch
+						{
+							// Print error?
+
+							// Skip this item
+							return;
+						}
+
+						if (procModuleBuffer == null || procModuleBuffer.Length < 1) return;
+
+						long result_all = 0 - tmpPattern.LongLength;
+						fixed (byte* pPacketBuffer = procModuleBuffer)
+						{
+							do
+							{
+								result_all = HelperMethods.FindPattern(pPacketBuffer, procModuleBuffer.Length, tmpPattern, tmpMask, result_all + tmpPattern.LongLength);
+								if (result_all >= 0)
+								{
+									results.Enqueue((ulong)procModule.BaseAddress.ToInt64() + (ulong)result_all);
+								}
+							} while (result_all != -1);
+						}
+					});
+
+					bool dequeueResult = results.TryDequeue(out ulong firstResult);
+					return dequeueResult ? firstResult : 0;
+				}
+				else
+				{
+					pm = HostProcess.Modules.Cast<ProcessModule>().FirstOrDefault(x => string.Equals(x.ModuleName, processModule, StringComparison.CurrentCultureIgnoreCase));
+					if (pm == null)
+						return 0;
+				}
+
+				byte[] buffer = new byte[pm.ModuleMemorySize];
+				try
+				{
+					buffer = Reader.ReadBytes(pm.BaseAddress, (uint)pm.ModuleMemorySize);
+				}
+				catch
+				{
+					Console.WriteLine($"ReadBytes(location: 0x{pm.BaseAddress.ToInt32():X8}, numBytes: {buffer.Length}) failed ...");
+					return 0;
+				}
+
+				if (buffer == null || buffer.Length < 1) return 0;
+
+				
 
 				long result = 0 - tmpPattern.LongLength;
 				fixed (byte* pPacketBuffer = buffer)
@@ -886,7 +926,15 @@ namespace TestInject
 		public static void WriteToFile(string contents)
 		{
 			if (contents.Length < 1) return;
-			File.WriteAllText($"{Memory.HostProcess.ProcessName}_SessionLogs.txt", contents);
+			try
+			{
+				File.WriteAllText($"{Memory.HostProcess.ProcessName}_SessionLogs.txt", contents);
+			}
+			catch
+			{
+				Debug.WriteLine($"WriteToFile - Failed writing contents to file '{Memory.HostProcess.ProcessName}_SessionLogs.txt'");
+			}
+			
 		}
 	}
 
