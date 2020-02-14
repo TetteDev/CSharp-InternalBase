@@ -22,6 +22,12 @@ namespace TestInject
 
 			// Probably dont do any hacking here, start a thread to your real main entry point
 
+			var result = Pattern.FindPattern(
+				"ac_client.exe",
+				"C3 E8 E8 D9 00 00 E9 78 FE FF FF");
+
+			Console.WriteLine($"Scan from all modules: 0x{result:X8}");
+
 			Console.ReadLine();
 		}
 
