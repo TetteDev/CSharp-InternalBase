@@ -44,7 +44,7 @@ Generated\ Files/
 TestResult.xml
 
 # ExtremeInjector Settings file
-[Bb]in/[Dd]ebug/settings.xml;
+[Bb]in/[Dd]ebug/*.xml;
 
 # Build Results of an ATL Project
 [Dd]ebugPS/

@@ -6,9 +6,13 @@ A compatible injector along with a appropriate settings file for said injector h
 
 Make sure to clone this repository and restore nuget packages as the functionality of this depends on them.
 
+# Memory.cs
+
+_Insert stuff about Memory.cs file here_
+
 # Credits
-    * Github User [master131](https://github.com/master131/ExtremeInjector) for his Injector
-    * Credits to author of [ILMerge](https://www.nuget.org/packages/ILMerge/3.0.29?_src=template)
-    * Credits to autor of [MSBuild.ILMerge.Task](https://www.nuget.org/packages/MSBuild.ILMerge.Task/1.1.3?_src=template)
-    * Credits to author of [DllExport](https://www.nuget.org/packages/DllExport/1.7.0?_src=template)
+* Github User [master131](https://github.com/master131/ExtremeInjector) for his Injector
+* Credits to author of [ILMerge](https://www.nuget.org/packages/ILMerge/3.0.29?_src=template)
+* Credits to autor of [MSBuild.ILMerge.Task](https://www.nuget.org/packages/MSBuild.ILMerge.Task/1.1.3?_src=template)
+* Credits to author of [DllExport](https://www.nuget.org/packages/DllExport/1.7.0?_src=template)
 
