@@ -7,7 +7,7 @@
       <Enable>true</Enable>
       <Export>DllMain</Export>
       <Parameters i:nil="true" />
-      <Path>C:\Users\Theo\source\repos\TestInject\TestInject\bin\Debug\MyLibrary.dll</Path>
+      <Path>MyLibrary.dll</Path>
     </_x202A__x202C__x200D__x200C__x200B__x202D__x200C__x200D__x202A__x202A__x206A__x202C__x200E__x200E__x206A__x206F__x200B__x202D__x202D__x206B__x206A__x202B__x200F__x200C__x206F__x206C__x202D__x206C__x202A__x200C__x200D__x202D__x206E__x200C__x206A__x200E__x202E__x206C__x206C__x206B__x202E_>
   </Modules>
   <Options>
