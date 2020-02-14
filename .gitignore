@@ -43,6 +43,9 @@ Generated\ Files/
 *.VisualState.xml
 TestResult.xml
 
+# ExtremeInjector Settings file
+[Bb]in/[Dd]ebug/settings.xml;
+
 # Build Results of an ATL Project
 [Dd]ebugPS/
 [Rr]eleasePS/
