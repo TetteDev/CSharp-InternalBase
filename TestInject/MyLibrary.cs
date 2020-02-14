@@ -22,6 +22,10 @@ namespace TestInject
 
 			// Probably dont do any hacking here, start a thread to your real main entry point
 
+			IntPtr _targetWindow = PInvoke.FindWindowByCaption(IntPtr.Zero, "AssaultCube");
+			Overlay _overlay = new Overlay(_targetWindow);
+			_overlay.ShowDialog();
+
 			Console.ReadLine();
 		}
 

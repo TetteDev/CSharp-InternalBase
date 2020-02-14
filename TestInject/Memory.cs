@@ -92,8 +92,6 @@ namespace TestInject
 			{
 				UpdateProcessInformation();
 
-				ProcessModule pm = default;
-
 				var tmpSplitPattern = pattern.TrimStart(' ').TrimEnd(' ').Split(' ');
 				var tmpPattern = new byte[tmpSplitPattern.Length];
 				var tmpMask = new byte[tmpSplitPattern.Length];
@@ -131,51 +129,13 @@ namespace TestInject
 
 				if (string.IsNullOrEmpty(processModule))
 				{
-					ConcurrentQueue<ulong> results = new ConcurrentQueue<ulong>();
-					Parallel.ForEach(HostProcess.Modules.Cast<ProcessModule>(), (procModule, state) =>
-					{
-						if (results.Count > 0)
-							state.Break();
-
-						byte[] procModuleBuffer = new byte[procModule.ModuleMemorySize];
-
-						try
-						{
-							procModuleBuffer = Reader.ReadBytes(procModule.BaseAddress, (uint) procModule.ModuleMemorySize);
-						}
-						catch
-						{
-							// Print error?
-
-							// Skip this item
-							return;
-						}
-
-						if (procModuleBuffer == null || procModuleBuffer.Length < 1) return;
-
-						long result_all = 0 - tmpPattern.LongLength;
-						fixed (byte* pPacketBuffer = procModuleBuffer)
-						{
-							do
-							{
-								result_all = HelperMethods.FindPattern(pPacketBuffer, procModuleBuffer.Length, tmpPattern, tmpMask, result_all + tmpPattern.LongLength);
-								if (result_all >= 0)
-								{
-									results.Enqueue((ulong)procModule.BaseAddress.ToInt64() + (ulong)result_all);
-								}
-							} while (result_all != -1);
-						}
-					});
-
-					bool dequeueResult = results.TryDequeue(out ulong firstResult);
-					return dequeueResult ? firstResult : 0;
+					// do shut
+					return 0;
 				}
-				else
-				{
-					pm = HostProcess.Modules.Cast<ProcessModule>().FirstOrDefault(x => string.Equals(x.ModuleName, processModule, StringComparison.CurrentCultureIgnoreCase));
-					if (pm == null)
-						return 0;
-				}
+
+				ProcessModule pm = HostProcess.Modules.Cast<ProcessModule>().FirstOrDefault(x => string.Equals(x.ModuleName, processModule, StringComparison.CurrentCultureIgnoreCase));
+				if (pm == null)
+					return 0;
 
 				byte[] buffer = new byte[pm.ModuleMemorySize];
 				try
@@ -189,8 +149,6 @@ namespace TestInject
 				}
 
 				if (buffer == null || buffer.Length < 1) return 0;
-
-				
 
 				long result = 0 - tmpPattern.LongLength;
 				fixed (byte* pPacketBuffer = buffer)
@@ -413,13 +371,53 @@ namespace TestInject
 					};
 					return true;
 				}
+				public bool World2Screen(float* matrix, out Vector screenPosition)
+				{
+					if (matrix == null)
+					{
+						screenPosition = new Vector(0f, 0f);
+						return false;
+					}
+
+					Vector4 vec = new Vector4
+					{
+						X = this.X * matrix[0] + this.Y * matrix[4] + this.Z * matrix[8] + matrix[12],
+						Y = this.X * matrix[1] + this.Y * matrix[5] + this.Z * matrix[9] + matrix[13],
+						Z = this.X * matrix[2] + this.Y * matrix[6] + this.Z * matrix[10] + matrix[14],
+						W = this.X * matrix[3] + this.Y * matrix[7] + this.Z * matrix[11] + matrix[15]
+					};
+
+					if (vec.W < 0.1f)
+					{
+						screenPosition = new Vector(0f, 0f);
+						return false;
+					}
+
+					Vector3 NDC = new Vector3
+					{
+						X = vec.X / vec.W,
+						Y = vec.Y / vec.W,
+						Z = vec.Z / vec.Z
+					};
+
+					int* w = (int*)0x00510C94;
+					int* h = (int*)0x00510C98;
+
+
+					screenPosition = new Vector
+					{
+						X = (*w / 2 * NDC.X) + (NDC.X + *w / 2),
+						Y = -(*h / 2 * NDC.Y) + (NDC.Y + *h / 2)
+					};
+					return true;
+				}
 
 				public float Max => (X > Y) ? ((X > Z) ? X : Z) : ((Y > Z) ? Y : Z);
 				public float Min => (X < Y) ? ((X < Z) ? X : Z) : ((Y < Z) ? Y : Z);
 				public float EuclideanNorm => (float)Math.Sqrt(X * X + Y * Y + Z * Z);
 				public float Square => X * X + Y * Y + Z * Z;
 				public float Magnitude => (float)Math.Sqrt(SumComponentSqrs());
-				public float Distance(Vector3 v1, Vector3 v2)
+				public float Distance3D(Vector3 v1, Vector3 v2)
 				{
 					return
 						(float)Math.Sqrt
@@ -429,9 +427,9 @@ namespace TestInject
 							(v1.Z - v2.Z) * (v1.Z - v2.Z)
 						);
 				}
-				public float Distance(Vector3 other)
+				public float Distance3D(Vector3 other)
 				{
-					return Distance(this, other);
+					return Distance3D(this, other);
 				}
 
 				public float Normalize()
@@ -786,6 +784,9 @@ namespace TestInject
 
 			[DllImport("kernel32.dll", CharSet = CharSet.Auto)]
 			public static extern IntPtr GetModuleHandle(string lpModuleName);
+
+			[DllImport("user32.dll", EntryPoint = "FindWindow", SetLastError = true)]
+			public static extern IntPtr FindWindowByCaption(IntPtr ZeroOnly, string lpWindowName);
 		}
 	}
 
@@ -884,9 +885,7 @@ namespace TestInject
 			{
 				Console.WriteLine($"Exception Data Dictionary Results:");
 				foreach (DictionaryEntry pair in exceptionObject.Data)
-				{
 					Console.WriteLine("	* {0} = {1}", pair.Key, pair.Value);
-				}
 			}
 
 			if (writeToFile)
@@ -934,7 +933,6 @@ namespace TestInject
 			{
 				Debug.WriteLine($"WriteToFile - Failed writing contents to file '{Memory.HostProcess.ProcessName}_SessionLogs.txt'");
 			}
-			
 		}
 	}
 
