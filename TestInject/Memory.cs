@@ -60,6 +60,12 @@ namespace TestInject
 					text = text.Substring(0, text.IndexOf('\0'));
 				return text;
 			}
+
+			public static unsafe void CopyBytesToLocation(IntPtr location, IntPtr targetLocation, int numBytes)
+			{
+				for(int offset = 0; offset < numBytes; offset++)
+					*(byte*)(location.ToInt32() + offset) = *(byte*)(targetLocation.ToInt32() + offset);
+			}
 		}
 
 		public class Writer
@@ -84,8 +90,19 @@ namespace TestInject
 				byte[] bytes = encodingType.GetBytes(str);
 				WriteBytes(location, bytes);
 			}
+
+			public static unsafe void CopyBytesToLocation(IntPtr location, IntPtr targetLocation, int numBytes)
+			{
+				for (int offset = 0; offset < numBytes; offset++)
+					*(byte*)(location.ToInt32() + offset) = *(byte*)(targetLocation.ToInt32() + offset);
+			}
 		}
-		
+
+		public class Detour
+		{
+
+		}
+
 		public class Pattern
 		{
 			public static unsafe ulong FindPattern(string processModule, string pattern, bool resultAbsolute = true)
@@ -213,10 +230,10 @@ namespace TestInject
 
 				foreach (ProcessThread pT in HostProcess.Threads)
 				{
-					// Dont suspend any threads started from our module, clr.dll module or clr_jit.dll module
-					if ((pT.StartAddress.ToInt64() >= ourModule.BaseAddress.ToInt64() || pT.StartAddress.ToInt64() <= (ourModule.BaseAddress + ourModule.ModuleMemorySize).ToInt64()) ||
-					    (pT.StartAddress.ToInt64() >= clrJit.BaseAddress.ToInt64() || pT.StartAddress.ToInt64() <= (clrJit.BaseAddress + clrJit.ModuleMemorySize).ToInt64()) ||
-					    (pT.StartAddress.ToInt64() >= clr.BaseAddress.ToInt64() || pT.StartAddress.ToInt64() <= (clr.BaseAddress + clr.ModuleMemorySize).ToInt64())) continue;
+					if (AddressResidesWithinModule(pT.StartAddress, ourModule, "our module") ||
+					    AddressResidesWithinModule(pT.StartAddress, clrJit, "clrJit") ||
+					    AddressResidesWithinModule(pT.StartAddress, clr, "clr"))
+						continue;
 
 					IntPtr pOpenThread = PInvoke.OpenThread(Enums.ThreadAccess.SUSPEND_RESUME, false, (uint)pT.Id);
 					if (pOpenThread == IntPtr.Zero)
@@ -246,6 +263,15 @@ namespace TestInject
 
 					PInvoke.CloseHandle(pOpenThread);
 				}
+			}
+
+			private static bool AddressResidesWithinModule(IntPtr address, ProcessModule processModule, string moduleDescriptor)
+			{
+				if (processModule == null)
+					throw new Exception($"AddressResidesWithinModule - Module with descriptor '{moduleDescriptor}' was null");
+
+				long modEnd = processModule.BaseAddress.ToInt64() + processModule.ModuleMemorySize;
+				return address.ToInt64() >= processModule.BaseAddress.ToInt64() && address.ToInt64() <= modEnd;
 			}
 		}
 
@@ -282,6 +308,13 @@ namespace TestInject
 				{
 					X = x;
 					Y = y;
+				}
+
+				public float Distance(Vector vector)
+				{
+					float dx = vector.X - X;
+					float dy = vector.Y - Y;
+					return (float)Math.Sqrt(dx * dx + dy * dy);
 				}
 			}
 

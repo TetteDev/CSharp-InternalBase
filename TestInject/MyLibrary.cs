@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
+using System.Threading;
 using System.Windows.Forms;
 using static TestInject.Memory;
 
@@ -21,10 +22,7 @@ namespace TestInject
 					MessageBoxIcon.Error);
 
 			// Probably dont do any hacking here, start a thread to your real main entry point
-
-			IntPtr _targetWindow = PInvoke.FindWindowByCaption(IntPtr.Zero, "AssaultCube");
-			Overlay _overlay = new Overlay(_targetWindow);
-			_overlay.ShowDialog();
+			new Thread(() => new Overlay("AssaultCube").ShowDialog()).Start();
 
 			Console.ReadLine();
 		}
@@ -32,12 +30,13 @@ namespace TestInject
 		static void CurrentDomain_UnhandledException(object sender, UnhandledExceptionEventArgs e)
 		{
 			HelperMethods.PrintExceptionData(e?.ExceptionObject, true);
-			if (!Debugger.IsAttached) return;
 
 			Exception obj = (Exception)e?.ExceptionObject;
 			if (obj != null)
 				PInvoke.SetLastError((uint)obj.HResult);
-			Debugger.Break();
+
+			if (Debugger.IsAttached)
+				Debugger.Break();
 		}
     }
 }

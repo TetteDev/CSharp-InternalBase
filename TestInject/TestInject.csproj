@@ -113,6 +113,7 @@
     <Reference Include="System.Xml" />
   </ItemGroup>
   <ItemGroup>
+    <Compile Include="AssaultCube.cs" />
     <Compile Include="Memory.cs" />
     <Compile Include="MyLibrary.cs" />
     <Compile Include="Overlay.cs">
