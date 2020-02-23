@@ -4,6 +4,7 @@ using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.Diagnostics;
+using System.Drawing;
 using System.Globalization;
 using System.IO;
 using System.Linq;
@@ -98,9 +99,40 @@ namespace TestInject
 			}
 		}
 
-		public class Detour
+		public class Detours
 		{
+			public static unsafe IntPtr JumpHook(IntPtr targetFunctionAddress, IntPtr hkAddress, int optPrologueLengthFixup = 5)
+			{
+				IntPtr newRegion = Allocator.Unmanaged.Allocate(10 + (uint)(optPrologueLengthFixup - 5));
+				Protection.SetPageProtection(targetFunctionAddress, optPrologueLengthFixup, Enums.MemoryProtection.ExecuteReadWrite, out var initProtect);
 
+				Writer.WriteBytes(newRegion, Reader.ReadBytes(targetFunctionAddress, (uint)optPrologueLengthFixup));
+
+				byte* t = (byte*)targetFunctionAddress;
+				*t = 0xe9;
+				t++;
+				*(uint*)t = ((uint)hkAddress - (uint)t - 4);
+
+				byte* nop = (byte*)(targetFunctionAddress + 5);
+				for (int n = 0; n < optPrologueLengthFixup - 5; n++)
+				{
+					*nop = 0x90;
+					n++;
+				}
+
+				Protection.SetPageProtection(targetFunctionAddress, optPrologueLengthFixup, initProtect, out _);
+				t = (byte*)newRegion + optPrologueLengthFixup;
+				*t = 0xe9;
+				t++;
+
+				*(uint*)t = ((uint)targetFunctionAddress - (uint)t + 1 + (uint)(optPrologueLengthFixup - 5));
+				Protection.SetPageProtection(newRegion, optPrologueLengthFixup, Enums.MemoryProtection.ExecuteRead, out _);
+
+				Console.WriteLine($"Original Function: 0x{newRegion.ToInt32():X8}");
+				Console.WriteLine($"Function to hook: 0x{targetFunctionAddress.ToInt32():X8}");
+				Console.WriteLine($"Our Hook: 0x{hkAddress.ToInt32():X8}");
+				return newRegion;
+			}
 		}
 
 		public class Pattern
@@ -979,6 +1011,28 @@ namespace TestInject
 					return pm;
 
 			return null;
+		}
+	}
+
+	public static class ByteArrayExtensions
+	{
+		
+	}
+
+	public static class GraphicsExtensions
+	{
+		public static void DrawBoundingBox(this Graphics gObj, Memory.Structures.Vector headScreenPos, Memory.Structures.Vector feetScreenPos, Pen color)
+		{
+			if (gObj == null)
+				return;
+
+			const int OFFSET = 20;
+			float height = Math.Abs(headScreenPos.Y - feetScreenPos.Y);
+			float width = height / 2;
+
+			gObj.DrawRectangle(color,
+				headScreenPos.X - width / 2, headScreenPos.Y - OFFSET,
+				width, height + OFFSET);
 		}
 	}
 }

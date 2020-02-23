@@ -113,7 +113,9 @@
     <Reference Include="System.Xml" />
   </ItemGroup>
   <ItemGroup>
-    <Compile Include="AssaultCube.cs" />
+    <Compile Include="CSGO.cs" />
+    <Compile Include="GDIMenuEx.cs" />
+    <Compile Include="GMenu.cs" />
     <Compile Include="Memory.cs" />
     <Compile Include="MyLibrary.cs" />
     <Compile Include="Overlay.cs">

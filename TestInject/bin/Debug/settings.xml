@@ -44,7 +44,7 @@
     <StealthInject>false</StealthInject>
     <TextColor>White</TextColor>
   </Options>
-  <ProcessName>ac_client.exe</ProcessName>
+  <ProcessName>csgo.exe</ProcessName>
   <Warnings>
     <LdrpLoadDll>false</LdrpLoadDll>
     <ManualMap>false</ManualMap>

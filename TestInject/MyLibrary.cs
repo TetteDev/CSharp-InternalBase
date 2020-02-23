@@ -22,18 +22,20 @@ namespace TestInject
 					MessageBoxIcon.Error);
 
 			// Probably dont do any hacking here, start a thread to your real main entry point
-			new Thread(() => new Overlay("AssaultCube").ShowDialog()).Start();
+			new Thread(() => new Overlay("Counter-Strike: Global Offensive").ShowDialog()).Start();
 
 			Console.ReadLine();
 		}
 
 		static void CurrentDomain_UnhandledException(object sender, UnhandledExceptionEventArgs e)
 		{
-			HelperMethods.PrintExceptionData(e?.ExceptionObject, true);
-
 			Exception obj = (Exception)e?.ExceptionObject;
 			if (obj != null)
 				PInvoke.SetLastError((uint)obj.HResult);
+
+			HelperMethods.PrintExceptionData(e?.ExceptionObject, true);
+			Console.WriteLine($"Marshal.GetLastWin32Error Code: 0x{Marshal.GetLastWin32Error():X8}");
+
 
 			if (Debugger.IsAttached)
 				Debugger.Break();
