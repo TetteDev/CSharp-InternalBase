@@ -8,8 +8,8 @@ using static TestInject.Memory;
 namespace TestInject
 {
 	public class MyLibrary
-    {
-	    [DllExport("DllMain", CallingConvention.Cdecl)]
+	{
+		[DllExport("DllMain", CallingConvention.Cdecl)]
 		public static void EntryPoint()
 		{
 			UpdateProcessInformation();
@@ -22,7 +22,13 @@ namespace TestInject
 					MessageBoxIcon.Error);
 
 			// Probably dont do any hacking here, start a thread to your real main entry point
-			new Thread(() => new Overlay("Counter-Strike: Global Offensive").ShowDialog()).Start();
+
+			Thread GUI = new Thread(() => new Overlay("Counter-Strike: Global Offensive").ShowDialog())
+			{
+				
+			};
+			GUI.Start();
+
 
 			Console.ReadLine();
 		}

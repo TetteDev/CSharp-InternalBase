@@ -15,6 +15,7 @@ using System.Security;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
+using System.Windows.Forms;
 
 namespace TestInject
 {
@@ -132,6 +133,85 @@ namespace TestInject
 				Console.WriteLine($"Function to hook: 0x{targetFunctionAddress.ToInt32():X8}");
 				Console.WriteLine($"Our Hook: 0x{hkAddress.ToInt32():X8}");
 				return newRegion;
+			}
+
+			public static unsafe IntPtr JmpHook(IntPtr targetFunctionAddress, Delegate hookDelegate, int optionalPrologueLength = 5)
+			{
+				/*
+				 * METHOD EXPLANATION
+				 * 1. Jump from 'targetfunctionAdddress' to 'hookFunctionAddressMiddleman'
+				 * 2. Overwrititen instruction(s) (by our jmp gets executed)
+				 * 3. Proceeds to jump to our hook function, done
+				 *
+				 * RETURN VALUE EXPLANATION
+				 * The returned value is a function pointer to the "original" or "unhooked" 'targetFunctionAddress'
+				 * Cast this into the appropriate function delegate and call it at the end of your hook
+				 */
+
+				if (optionalPrologueLength < 5 || targetFunctionAddress == IntPtr.Zero || hookDelegate == null)
+					return IntPtr.Zero;
+
+				if (Environment.Is64BitProcess)
+					throw new InvalidOperationException($"JmpHook - Logic for X64 has not been implemented");
+
+				IntPtr hookFunction = Marshal.GetFunctionPointerForDelegate(hookDelegate);
+				if (hookFunction == IntPtr.Zero)
+					return IntPtr.Zero;
+
+				IntPtr origFunctionAddress = Allocator.Unmanaged.Allocate((uint)optionalPrologueLength + 5);
+				if (origFunctionAddress == IntPtr.Zero)
+					return IntPtr.Zero;
+
+				if (!PInvoke.VirtualProtect(targetFunctionAddress, optionalPrologueLength, Enums.MemoryProtection.ExecuteReadWrite, out var oldProtect))
+					return IntPtr.Zero;
+
+				int n = 0;
+				for (n = 0; n < optionalPrologueLength; n++)
+				{
+					// Copy N bytes from address we place our hook on to our 
+					*(byte*) (origFunctionAddress + n) = *(byte*) (targetFunctionAddress + n);
+				}
+
+				//n++;
+				*(byte*) (origFunctionAddress + n) = 0xE9;
+
+				// After we've written the original overwritten bytes into our originalFunctionAddress region
+				// write jump that jumps to the original function + however many bytes we over wrote for our jmp + nops (if optionalPrologueLength > 5)
+				n++;
+				//*(uint*) (origFunctionAddress + n) = HelperMethods.CalculateRelativeAddressForJmp((uint) (targetFunctionAddress + optionalPrologueLength), (uint) (origFunctionAddress + n));
+				*(uint*)(origFunctionAddress + n) = HelperMethods.CalculateRelativeAddressForJmp((uint)(origFunctionAddress + n), (uint)(targetFunctionAddress + optionalPrologueLength + (optionalPrologueLength - 5)));
+
+				IntPtr hookFunctionAddressMiddleman = Allocator.Unmanaged.Allocate((uint) optionalPrologueLength + 5);
+				if (hookFunctionAddressMiddleman == IntPtr.Zero)
+					return IntPtr.Zero;
+
+				n = 0;
+				for (n = 0; n < optionalPrologueLength; n++)
+				{
+					// Copy N bytes from address we place our hook on to our middle man allocation
+					// Thus preserving the initial instruction(s) we overwrite in our hook
+					*(byte*)(hookFunctionAddressMiddleman + n) = *(byte*)(targetFunctionAddress + n);
+				}
+
+
+				// Jump to our hook function from the middleman region
+				//n++;
+				*(byte*)(hookFunctionAddressMiddleman + n) = 0xE9;
+
+				n++;
+				//*(uint*) (hookFunctionAddressMiddleman + n) = HelperMethods.CalculateRelativeAddressForJmp((uint)hookFunction, (uint)(hookFunctionAddressMiddleman + n));
+				*(uint*)(hookFunctionAddressMiddleman + n) = HelperMethods.CalculateRelativeAddressForJmp((uint)(hookFunctionAddressMiddleman + n - 1), (uint)hookFunction);
+
+				// Jump from our target function to our middle man region
+				*(byte*) targetFunctionAddress = 0xE9;
+				*(uint*)(targetFunctionAddress + 1) = HelperMethods.CalculateRelativeAddressForJmp((uint)targetFunctionAddress, (uint)hookFunctionAddressMiddleman);
+
+				int nopsNeeded = optionalPrologueLength - 5;
+				for (n = 0; n < nopsNeeded; n++)
+					*(byte*)(targetFunctionAddress + 4 + (n + 1)) = 0x90;
+
+				PInvoke.VirtualProtect(targetFunctionAddress, optionalPrologueLength, oldProtect, out _);
+				return origFunctionAddress;
 			}
 		}
 
@@ -957,6 +1037,9 @@ namespace TestInject
 				WriteToFile(formattedContent);
 
 		}
+
+		public static uint CalculateRelativeAddressForJmp(uint from, uint to)
+			=> to - from - 5;
 
 		public static unsafe long FindPattern(byte* body, int bodyLength, byte[] pattern, byte[] masks, long start = 0)
 		{

@@ -5,6 +5,7 @@ using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading.Tasks;
 using static TestInject.CSGO.Structures;
+using static TestInject.Memory.Structures;
 
 namespace TestInject
 {
@@ -34,11 +35,10 @@ namespace TestInject
 				=> (LocalPlayer_t*)*(uint*)(Modules.Client + Offsets.signatures.dwLocalPlayer);
 
 			public static unsafe ClientState_t* GetClientState()
-				=> (ClientState_t*)*(uint*)(Modules.Client + Offsets.signatures.dwClientState);
+				=> (ClientState_t*)*(uint*)(Modules.Engine + Offsets.signatures.dwClientState);
 
 			public static unsafe GlobalVars_t* GetGlobalVars()
 				=> (GlobalVars_t*)*(uint*)(Modules.Engine + Offsets.signatures.dwGlobalVars);
-
 		}
 
 		public class Structures
@@ -84,11 +84,11 @@ namespace TestInject
 			[StructLayout(LayoutKind.Explicit)]
 			public unsafe struct ClientState_t
 			{
-				[FieldOffset(Offsets.signatures.dwClientState_State)] public int GameState;
+				[FieldOffset(Offsets.signatures.dwClientState_State)] public Enums.GameState GameState;
 
 				[FieldOffset(Offsets.signatures.dwClientState_MaxPlayer)] public int MaxPlayers;
 
-				[FieldOffset(Offsets.signatures.dwClientState_ViewAngles)] public Memory.Structures.Vector3 ViewAngles;
+				[FieldOffset(Offsets.signatures.dwClientState_ViewAngles)] public Vector3 ViewAngles;
 
 				[FieldOffset(Offsets.signatures.dwClientState_IsHLTV)] public int IsHLTV;
 
@@ -136,8 +136,32 @@ namespace TestInject
 
 				[FieldOffset(0x003A)] public int nTimestampRandomizeWindow;
 			}
+
+			[StructLayout(LayoutKind.Explicit)]
+			public struct Enemy_t
+			{
+				[FieldOffset(Offsets.netvars.m_iHealth)] public int Health;
+
+				[FieldOffset(Offsets.netvars.m_iTeamNum)] public int Team;
+
+				[FieldOffset(Offsets.signatures.m_bDormant)] public bool Dormant;
+
+				[FieldOffset(Offsets.netvars.m_bSpotted)] public bool Spotted;
+
+				[FieldOffset(Offsets.netvars.m_bSpottedByMask)] public bool SpottedByMask;
+
+				[FieldOffset(Offsets.netvars.m_vecOrigin)] public Vector3 Origin;
+			}
 		}
 
+		public class Enums
+		{
+			public enum GameState
+			{
+				MENU = 0,
+				GAME = 6
+			}
+		}
 
 		public class Offsets
 		{
@@ -293,3 +317,4 @@ namespace TestInject
 		}
 	}
 }
+

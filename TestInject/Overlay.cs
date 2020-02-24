@@ -8,6 +8,7 @@ using System.Threading;
 using System.Windows.Forms;
 using static TestInject.Memory;
 using static TestInject.CSGO;
+using static TestInject.CSGO.Structures;
 
 namespace TestInject
 {
@@ -139,17 +140,34 @@ namespace TestInject
 			
 			Graphics g = e.Graphics;
 			// Somehow not disposing our graphics object when doublebuffered is enabled is good?
-			CSGO.Structures.LocalPlayer_t* t = Methods.GetLocalPlayer();
-
+			
 			if (_menu != null && _menu.IsShowing)
 				_menu.DrawMenu(ref g);
 
-			if (_menu.Config.MenuTitle != $"LocalPlayer: 0x{((uint)t):X8}")
-				_menu.Config.MenuTitle = $"LocalPlayer: 0x{((uint) t):X8}";
-			
 			// Draw here
+			ClientState_t* client = Methods.GetClientState();
+			if (client != null && client->GameState == CSGO.Enums.GameState.GAME)
+			{
+				LocalPlayer_t* local = Methods.GetLocalPlayer();
+				GlobalVars_t* global = Methods.GetGlobalVars();
 
-			Thread.Sleep(25);
+				for (int playerIndex = 0; playerIndex < client->MaxPlayers; playerIndex++)
+				{
+					Enemy_t* enemy = (Enemy_t*)((CSGO.Modules.Client + Offsets.signatures.dwEntityList) + (playerIndex * 0x10));
+
+					if (enemy == null)
+						break;
+
+					if ((uint)enemy == (uint)local || enemy->Dormant)
+						continue;
+
+					Console.WriteLine($"Player Base: 0x{(uint)enemy:X8}\n" +
+					                  $"	Health: {enemy->Health}");
+				}
+
+				int x = 1;
+			}
+
 			Invalidate();
 		}
 
