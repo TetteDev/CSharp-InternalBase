@@ -1,6 +1,5 @@
 ﻿using System;
 using System.Collections;
-using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.Diagnostics;
@@ -12,8 +11,8 @@ using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Security;
 using System.Text;
-using System.Threading;
-using System.Threading.Tasks;
+using static TestInject.Memory.Enums;
+using static TestInject.Memory.Structures;
 
 namespace TestInject
 {
@@ -100,7 +99,256 @@ namespace TestInject
 
 		public class Detour
 		{
+			public class HookObj<T> : IDisposable where T : Delegate
+			{
+				private bool _disposed;
+				private GCHandle _selfGcHandle;
 
+				public bool IsImplemented;
+
+				public readonly IntPtr TargetAddress;
+
+				public T UnmodifiedOriginalFunction;
+				private GCHandle _unmodifiedOriginalFunctionDelegateGcHandle;
+
+				public readonly T HookMethod;
+				public readonly IntPtr HookMethodAddress;
+				private GCHandle _hookMethodGcHandle;
+
+				private readonly uint _overwrittenByteCount;
+				private List<IntPtr> _unmanagedAllocations;
+
+				public HookObj(IntPtr targetAddress, T hkDelegate,uint optionalPrologueLengthFixup = 5, bool implementImmediately = false)
+				{
+					if (targetAddress == IntPtr.Zero || hkDelegate == null || optionalPrologueLengthFixup < 5)
+						throw new InvalidOperationException($"write something here");
+
+					if (Environment.Is64BitProcess)
+						throw new InvalidOperationException($"No 64Bit support has been Implemented!");
+
+					TargetAddress = targetAddress;
+					UnmodifiedOriginalFunction = Marshal.GetDelegateForFunctionPointer<T>(targetAddress);
+					_unmodifiedOriginalFunctionDelegateGcHandle = GCHandle.Alloc(UnmodifiedOriginalFunction);
+
+					_overwrittenByteCount = optionalPrologueLengthFixup;
+
+					HookMethod = hkDelegate;
+					_hookMethodGcHandle = GCHandle.Alloc(HookMethod, GCHandleType.Pinned);
+					HookMethodAddress = Marshal.GetFunctionPointerForDelegate(HookMethod);
+
+					_unmanagedAllocations = new List<IntPtr>();
+
+					_selfGcHandle = GCHandle.Alloc(this);
+
+					if (implementImmediately)
+						Install();
+				}
+
+				public unsafe bool Install()
+				{
+					if (_disposed) throw new NullReferenceException($"This object has been explicitly disposed already!");
+
+					if (!IsImplemented)
+					{
+						if (!Protection.SetPageProtection(TargetAddress, (int) _overwrittenByteCount, MemoryProtection.ExecuteReadWrite, out var oldProtect))
+							return false;
+
+						IntPtr addrMiddleMan = IntPtr.Zero;
+						IntPtr addrOFuncAddress = IntPtr.Zero;
+
+						if (_unmanagedAllocations != null && _unmanagedAllocations.Count == 2)
+						{
+							addrMiddleMan = _unmanagedAllocations[0];
+							addrOFuncAddress = _unmanagedAllocations[1];
+
+							// Maybe extra check to see if the actual values used are zero
+							// or not before actually using them?
+						}
+						else
+						{
+							addrMiddleMan = Allocator.Unmanaged.Allocate(_overwrittenByteCount + 5);
+							addrOFuncAddress = Allocator.Unmanaged.Allocate(_overwrittenByteCount + 5);
+
+							if (addrMiddleMan == IntPtr.Zero || addrOFuncAddress == IntPtr.Zero)
+							{
+								Protection.SetPageProtection(TargetAddress, (int)_overwrittenByteCount, oldProtect, out _);
+								return false;
+							}
+								
+							_unmanagedAllocations = new List<IntPtr> { addrMiddleMan, addrOFuncAddress };
+						}
+
+						IntPtr addrHook = Marshal.GetFunctionPointerForDelegate(HookMethod);
+
+						if (addrMiddleMan == IntPtr.Zero ||
+						    addrOFuncAddress == IntPtr.Zero ||
+						    addrHook == IntPtr.Zero)
+						{
+							Protection.SetPageProtection(TargetAddress, (int)_overwrittenByteCount, oldProtect, out _);
+							if (addrMiddleMan != IntPtr.Zero)
+							{
+								Allocator.Unmanaged.FreeMemory(addrMiddleMan);
+								_unmanagedAllocations.Remove(addrMiddleMan);
+							}
+							if (addrOFuncAddress != IntPtr.Zero)
+							{
+								Allocator.Unmanaged.FreeMemory(addrOFuncAddress);
+								_unmanagedAllocations.Remove(addrOFuncAddress);
+							}
+							return false;
+						}
+
+						// Middleman -> Hook
+						for (int n = 0; n < _overwrittenByteCount; n++)
+							*(byte*)(addrMiddleMan + n) = *(byte*)(TargetAddress + n);
+
+						*(byte*)((uint)addrMiddleMan + _overwrittenByteCount) = 0xE9;
+						*(uint*)((uint)addrMiddleMan + _overwrittenByteCount + 1) = HelperMethods.CalculateRelativeAddressForJmp(
+							(uint)addrMiddleMan + _overwrittenByteCount,
+							(uint)addrHook);
+
+						// Original Function Address Copy Region -> (Target Address + optionalPrologueLength)
+						for (int n = 0; n < _overwrittenByteCount; n++)
+							*(byte*)(addrOFuncAddress + n) = *(byte*)(TargetAddress + n);
+
+						*(byte*)((uint)addrOFuncAddress + _overwrittenByteCount) = 0xE9;
+						*(uint*)((uint)addrOFuncAddress + _overwrittenByteCount + 1) = HelperMethods.CalculateRelativeAddressForJmp(
+							(uint)addrOFuncAddress + _overwrittenByteCount,
+							(uint)TargetAddress + _overwrittenByteCount);
+
+						// Target -> Middleman
+						*(byte*)TargetAddress = 0xE9;
+						*(uint*)(TargetAddress + 1) = HelperMethods.CalculateRelativeAddressForJmp((uint)TargetAddress, (uint)addrMiddleMan);
+
+						for (int n = 0; n < _overwrittenByteCount - 5; n++)
+							*(byte*)(TargetAddress + 5 + n) = 0x90;
+
+						Protection.SetPageProtection(TargetAddress, (int)_overwrittenByteCount, oldProtect, out _);
+
+						UnmodifiedOriginalFunction = Marshal.GetDelegateForFunctionPointer<T>(_unmanagedAllocations[1]);
+						if (_unmodifiedOriginalFunctionDelegateGcHandle.IsAllocated)
+							_unmodifiedOriginalFunctionDelegateGcHandle.Free();
+
+						_unmodifiedOriginalFunctionDelegateGcHandle = GCHandle.Alloc(_unmodifiedOriginalFunctionDelegateGcHandle, GCHandleType.Pinned);
+
+						IsImplemented = true;
+						return IsImplemented;
+					}
+
+					return true;
+				}
+				public unsafe bool Uninstall()
+				{
+					if (_disposed) throw new NullReferenceException($"This object has been explicitly disposed already!");
+
+					if (IsImplemented)
+					{
+						// Restore
+						if (!Protection.SetPageProtection(TargetAddress, (int)_overwrittenByteCount, MemoryProtection.ExecuteReadWrite, out var oldProtect))
+							return false;
+
+						for (int n = 0; n < _overwrittenByteCount; n++)
+							*(byte*) (TargetAddress + n) = *(byte*) (_unmanagedAllocations[1] + n);
+
+						Protection.SetPageProtection(TargetAddress, (int)_overwrittenByteCount, oldProtect, out _);
+
+						UnmodifiedOriginalFunction = Marshal.GetDelegateForFunctionPointer<T>(TargetAddress);
+						if (_unmodifiedOriginalFunctionDelegateGcHandle.IsAllocated)
+							_unmodifiedOriginalFunctionDelegateGcHandle.Free();
+
+						_unmodifiedOriginalFunctionDelegateGcHandle = GCHandle.Alloc(UnmodifiedOriginalFunction, GCHandleType.Pinned);
+
+						IsImplemented = false;
+						return !IsImplemented;
+					}
+
+					return false;
+				}
+
+				public void Dispose()
+				{
+					Dispose(true);
+					GC.SuppressFinalize(this);
+				}
+				protected virtual void Dispose(bool disposing)
+				{
+					if (!_disposed && disposing)
+					{
+						if (IsImplemented)
+							Uninstall();
+
+						if (_unmanagedAllocations != null)
+							foreach (IntPtr allocationBaseAddress in _unmanagedAllocations)
+								Allocator.Unmanaged.FreeMemory(allocationBaseAddress);
+
+						if(_hookMethodGcHandle.IsAllocated)
+							_hookMethodGcHandle.Free();
+
+						if (_unmodifiedOriginalFunctionDelegateGcHandle.IsAllocated)
+							_unmodifiedOriginalFunctionDelegateGcHandle.Free();
+
+						if (_selfGcHandle.IsAllocated)
+							_selfGcHandle.Free();
+
+						_disposed = true;
+					}
+				}
+			}
+
+			public static unsafe T Hook<T>(IntPtr targetAddress, T hkDelegate, uint optionalPrologueLengthFixup = 5) where T : Delegate
+			{
+				// Returns a delegate to the original "unhooked" function
+				if (targetAddress == IntPtr.Zero || hkDelegate == null || optionalPrologueLengthFixup < 5)
+					return null;
+
+				if (!Protection.SetPageProtection(targetAddress, (int) optionalPrologueLengthFixup, MemoryProtection.ExecuteReadWrite, out var oldProtect))
+					return null;
+
+				IntPtr addrMiddleMan = Allocator.Unmanaged.Allocate(optionalPrologueLengthFixup + 5);
+				IntPtr addrOFuncAddress = Allocator.Unmanaged.Allocate(optionalPrologueLengthFixup + 5);
+				IntPtr addrHook = Marshal.GetFunctionPointerForDelegate(hkDelegate);
+
+				if (addrMiddleMan == IntPtr.Zero ||
+				    addrOFuncAddress == IntPtr.Zero ||
+				    addrHook == IntPtr.Zero)
+				{
+					Protection.SetPageProtection(targetAddress, (int) optionalPrologueLengthFixup, oldProtect, out _);
+					if (addrMiddleMan != IntPtr.Zero) Allocator.Unmanaged.FreeMemory(addrMiddleMan);
+					if (addrOFuncAddress != IntPtr.Zero) Allocator.Unmanaged.FreeMemory(addrOFuncAddress);
+					return null;
+				}
+				
+				// Middleman -> Hook
+				for (int n = 0; n < optionalPrologueLengthFixup; n++)
+					*(byte*)(addrMiddleMan + n) = *(byte*)(targetAddress + n);
+
+				*(byte*) ((uint)addrMiddleMan + optionalPrologueLengthFixup) = 0xE9;
+				*(uint*)((uint)addrMiddleMan + optionalPrologueLengthFixup + 1) = HelperMethods.CalculateRelativeAddressForJmp(
+					(uint)addrMiddleMan + optionalPrologueLengthFixup,
+					(uint)addrHook);
+
+				// Original Function Address Copy Region -> (Target Address + optionalPrologueLength)
+				for (int n = 0; n < optionalPrologueLengthFixup; n++)
+					*(byte*)(addrOFuncAddress + n) = *(byte*)(targetAddress + n);
+
+				*(byte*)((uint)addrOFuncAddress + optionalPrologueLengthFixup) = 0xE9;
+				*(uint*)((uint)addrOFuncAddress + optionalPrologueLengthFixup + 1) = HelperMethods.CalculateRelativeAddressForJmp(
+					(uint)addrOFuncAddress + optionalPrologueLengthFixup,
+					(uint)targetAddress + optionalPrologueLengthFixup);
+
+				// Target -> Middleman
+				*(byte*) targetAddress = 0xE9;
+				*(uint*) (targetAddress + 1) = HelperMethods.CalculateRelativeAddressForJmp((uint)targetAddress, (uint)addrMiddleMan);
+
+				for (int n = 0; n < optionalPrologueLengthFixup - 5; n++)
+					*(byte*)(targetAddress + 5 + n) = 0x90;
+
+				//Protection.SetPageProtection(addrMiddleMan, (int)optionalPrologueLengthFixup + 5, MemoryProtection.ExecuteRead, out _);
+				//Protection.SetPageProtection(addrOFuncAddress, (int)optionalPrologueLengthFixup + 5, MemoryProtection.ExecuteRead, out _);
+				Protection.SetPageProtection(targetAddress, (int) optionalPrologueLengthFixup, oldProtect, out _);
+
+				return Marshal.GetDelegateForFunctionPointer<T>(addrOFuncAddress);
+			}
 		}
 
 		public class Pattern
@@ -179,15 +427,121 @@ namespace TestInject
 				}
 				return 0;
 			}
+
+			public static unsafe List<long> FindPattern(string pattern, bool readable = true, bool writable = true, bool executable= true)
+			{
+				#region Creation of Byte Array from string pattern
+				var tmpSplitPattern = pattern.TrimStart(' ').TrimEnd(' ').Split(' ');
+				var tmpPattern = new byte[tmpSplitPattern.Length];
+				var tmpMask = new byte[tmpSplitPattern.Length];
+
+				for (var i = 0; i < tmpSplitPattern.Length; i++)
+				{
+					var ba = tmpSplitPattern[i];
+
+					if (ba == "??" || ba.Length == 1 && ba == "?")
+					{
+						tmpMask[i] = 0x00;
+						tmpSplitPattern[i] = "0x00";
+					}
+					else if (char.IsLetterOrDigit(ba[0]) && ba[1] == '?')
+					{
+						tmpMask[i] = 0xF0;
+						tmpSplitPattern[i] = ba[0] + "0";
+					}
+					else if (char.IsLetterOrDigit(ba[1]) && ba[0] == '?')
+					{
+						tmpMask[i] = 0x0F;
+						tmpSplitPattern[i] = "0" + ba[1];
+					}
+					else
+					{
+						tmpMask[i] = 0xFF;
+					}
+				}
+
+
+				for (var i = 0; i < tmpSplitPattern.Length; i++)
+					tmpPattern[i] = (byte)(Convert.ToByte(tmpSplitPattern[i], 16) & tmpMask[i]);
+
+				if (tmpMask.Length != tmpPattern.Length)
+					throw new ArgumentException($"{nameof(pattern)}.Length != {nameof(tmpMask)}.Length");
+				#endregion
+
+				PInvoke.SYSTEM_INFO si = new PInvoke.SYSTEM_INFO();
+				PInvoke.GetSystemInfo(ref si);
+
+				List<long> results = new List<long>();
+
+				uint lpMem = (uint)si.lpMinimumApplicationAddress;
+				while (lpMem < (uint)si.lpMaximumApplicationAddress)
+				{
+					if (PInvoke.VirtualQuery((IntPtr) lpMem, 
+						    out MEMORY_BASIC_INFORMATION lpBuffer, 
+						    (uint)Marshal.SizeOf<MEMORY_BASIC_INFORMATION>()) != 0)
+					{
+						var buff = &lpBuffer;
+
+						bool isValid = buff->State == MemoryState.MEM_COMMIT;
+						isValid &= (uint)(buff->BaseAddress) < (uint)si.lpMaximumApplicationAddress;
+						isValid &= ((buff->Protect & MemoryProtection.GuardModifierFlag) == 0);
+						isValid &= ((buff->Protect & MemoryProtection.NoAccess) == 0);
+						isValid &= (buff->Type == MemoryType.MEM_PRIVATE) || (buff->Type == MemoryType.MEM_IMAGE);
+
+						if (isValid)
+						{
+							bool isReadable = (buff->Protect & MemoryProtection.ReadOnly) > 0;
+
+							
+
+							bool isWritable = ((buff->Protect & MemoryProtection.ReadWrite) > 0) ||
+							                  ((buff->Protect & MemoryProtection.WriteCopy) > 0) ||
+							                  ((buff->Protect & MemoryProtection.ExecuteReadWrite) > 0) ||
+							                  ((buff->Protect & MemoryProtection.ExecuteWriteCopy) > 0);
+
+							bool isExecutable = ((buff->Protect & MemoryProtection.Execute) > 0) ||
+							                    ((buff->Protect & MemoryProtection.ExecuteRead) > 0) ||
+							                    ((buff->Protect & MemoryProtection.ExecuteReadWrite) > 0) ||
+							                    ((buff->Protect & MemoryProtection.ExecuteWriteCopy) > 0);
+
+							isReadable &= readable;
+							isWritable &= writable;
+							isExecutable &= executable;
+
+							isValid &= isReadable || isWritable || isExecutable;
+
+							if (isValid)
+							{
+								long result = 0 - tmpPattern.LongLength;
+								do
+								{
+									result = HelperMethods.FindPattern((byte*)buff->BaseAddress, (int)buff->RegionSize, tmpPattern, tmpMask, result + tmpPattern.LongLength);
+									if (result >= 0)
+										results.Add((long)buff->BaseAddress + result);
+
+								} while (result != -1);
+							}
+						}
+
+						lpMem = (uint)buff->BaseAddress + (uint)buff->RegionSize;
+					}
+				}
+				return results;
+			}
 		}
 
 		public class Allocator
 		{
 			public class Managed
 			{
-				public static IntPtr ManagedAllocate(int size)
-					=> Marshal.AllocHGlobal(size);
-
+				public static IntPtr ManagedAllocate(int size, Enums.MemoryProtection protection)
+				{
+					IntPtr alloc = Marshal.AllocHGlobal(size);
+					if (alloc == IntPtr.Zero) return IntPtr.Zero;
+					Protection.SetPageProtection(alloc, size, protection, out _);
+					return alloc;
+				}
+				
 				public static void ManagedFree(IntPtr address)
 					=> Marshal.FreeHGlobal(address);
 			}
@@ -265,6 +619,97 @@ namespace TestInject
 				}
 			}
 
+			public static void SuspendThreadsStartedFromModule(string moduleName)
+			{
+				UpdateProcessInformation();
+				ProcessModule pModule = HostProcess.Modules.Cast<ProcessModule>()
+					.FirstOrDefault(mod => mod.ModuleName.ToLower() == moduleName);
+
+				if (pModule == default)
+					return;
+
+				foreach (ProcessThread pT in HostProcess.Threads)
+				{
+					if (AddressResidesWithinModule(pT.StartAddress, pModule, pModule.ModuleName))
+					{
+						IntPtr pOpenThread = PInvoke.OpenThread(ThreadAccess.SUSPEND_RESUME, false, (uint)pT.Id);
+						if (pOpenThread == IntPtr.Zero)
+							continue;
+
+						PInvoke.SuspendThread(pOpenThread);
+						PInvoke.CloseHandle(pOpenThread);
+					}
+				}
+
+			}
+			public static void SuspendThreadsStartedFromModule(ProcessModule pModule)
+			{
+				UpdateProcessInformation();
+
+				foreach (ProcessThread pT in HostProcess.Threads)
+				{
+					if (AddressResidesWithinModule(pT.StartAddress, pModule, pModule.ModuleName))
+					{
+						IntPtr pOpenThread = PInvoke.OpenThread(ThreadAccess.SUSPEND_RESUME, false, (uint)pT.Id);
+						if (pOpenThread == IntPtr.Zero)
+							continue;
+
+						PInvoke.SuspendThread(pOpenThread);
+						PInvoke.CloseHandle(pOpenThread);
+					}
+				}
+			}
+
+			public static void ResumeThreadsStartedFromModule(string moduleName)
+			{
+				UpdateProcessInformation();
+				ProcessModule pModule = HostProcess.Modules.Cast<ProcessModule>()
+					.FirstOrDefault(mod => mod.ModuleName.ToLower() == moduleName);
+
+				if (pModule == default)
+					return;
+
+				foreach (ProcessThread pT in HostProcess.Threads)
+				{
+					if (AddressResidesWithinModule(pT.StartAddress, pModule, pModule.ModuleName))
+					{
+						IntPtr pOpenThread = PInvoke.OpenThread(Enums.ThreadAccess.SUSPEND_RESUME, false, (uint)pT.Id);
+
+						if (pOpenThread == IntPtr.Zero)
+							continue;
+
+						var suspendCount = 0;
+						do
+						{
+							suspendCount = PInvoke.ResumeThread(pOpenThread);
+						} while (suspendCount > 0);
+
+						PInvoke.CloseHandle(pOpenThread);
+					}
+				}
+			}
+			public static void ResumeThreadsStartedFromModule(ProcessModule pModule)
+			{
+				foreach (ProcessThread pT in HostProcess.Threads)
+				{
+					if (AddressResidesWithinModule(pT.StartAddress, pModule, pModule.ModuleName))
+					{
+						IntPtr pOpenThread = PInvoke.OpenThread(Enums.ThreadAccess.SUSPEND_RESUME, false, (uint)pT.Id);
+
+						if (pOpenThread == IntPtr.Zero)
+							continue;
+
+						var suspendCount = 0;
+						do
+						{
+							suspendCount = PInvoke.ResumeThread(pOpenThread);
+						} while (suspendCount > 0);
+
+						PInvoke.CloseHandle(pOpenThread);
+					}
+				}
+			}
+
 			private static bool AddressResidesWithinModule(IntPtr address, ProcessModule processModule, string moduleDescriptor)
 			{
 				if (processModule == null)
@@ -319,7 +764,7 @@ namespace TestInject
 			}
 
 			[StructLayout(LayoutKind.Sequential)]
-			public struct D3DMATRIX
+			public unsafe struct D3DMATRIX
 			{
 				public float _11, _12, _13, _14;
 				public float _21, _22, _23, _24;
@@ -683,6 +1128,13 @@ namespace TestInject
 		}
 		public class Enums	
 		{
+			public enum LogType
+			{
+				Normal,
+				Warning,
+				Error,
+			}
+
 			[Flags]
 			public enum AllocationType
 			{
@@ -708,9 +1160,9 @@ namespace TestInject
 				ReadOnly = 0x02,
 				ReadWrite = 0x04,
 				WriteCopy = 0x08,
-				GuardModifierflag = 0x100,
-				NoCacheModifierflag = 0x200,
-				WriteCombineModifierflag = 0x400
+				GuardModifierFlag = 0x100,
+				NoCacheModifierFlag = 0x200,
+				WriteCombineModifierFlag = 0x400
 			}
 
 			public enum FreeType
@@ -763,9 +1215,35 @@ namespace TestInject
 				IMPERSONATE = (0x0100),
 				DIRECT_IMPERSONATION = (0x0200)
 			}
+
+			public enum TriStateBool
+			{
+				Checked,
+				Unchecked,
+				DontCare
+			}
 		}
 		public class PInvoke
 		{
+			[StructLayout(LayoutKind.Sequential)]
+			public struct SYSTEM_INFO
+			{
+				internal ushort wProcessorArchitecture;
+				internal ushort wReserved;
+				internal uint dwPageSize;
+				internal IntPtr lpMinimumApplicationAddress;
+				internal IntPtr lpMaximumApplicationAddress;
+				internal IntPtr dwActiveProcessorMask;
+				internal uint dwNumberOfProcessors;
+				internal uint dwProcessorType;
+				internal uint dwAllocationGranularity;
+				internal ushort wProcessorLevel;
+				internal ushort wProcessorRevision;
+			}
+
+			[DllImport("kernel32.dll", SetLastError = true)]
+			public static extern void GetSystemInfo(ref SYSTEM_INFO Info);
+
 			[DllImport("kernel32", CharSet = CharSet.Ansi, ExactSpelling = true, SetLastError = true)]
 			public static extern IntPtr GetProcAddress(IntPtr hModule, string procName);
 
@@ -866,10 +1344,31 @@ namespace TestInject
 			}
 			return false;
 		}
+
+		public static void Log(string message, LogType logType = LogType.Normal)
+		{
+			if (string.IsNullOrEmpty(message) || string.IsNullOrWhiteSpace(message))
+				return;
+
+			Console.ForegroundColor = ConsoleColor.Cyan;
+			Console.Write($"[{DateTime.Now.ToLongTimeString()}]");
+			Console.ResetColor();
+
+			if (logType != LogType.Normal)
+			{
+				Console.ForegroundColor = logType == LogType.Normal ? ConsoleColor.Green : logType == LogType.Warning ? ConsoleColor.Yellow : ConsoleColor.Red;
+				Console.Write($"[{logType.ToString().ToUpper()}]");
+				Console.ResetColor();
+			}
+			
+			Console.Write($"{message}\n");
+		}
 	}
 
 	public class HelperMethods
 	{
+		public static uint CalculateRelativeAddressForJmp(uint from, uint to) => to - from - 5;
+
 		public static void PrintExceptionData(object exceptionObj, bool writeToFile = false)
 		{
 			if (exceptionObj == null) return;
@@ -969,7 +1468,6 @@ namespace TestInject
 		}
 	}
 
-	// Extensions
 	public static class ProcessExtensions
 	{
 		public static ProcessModule FindProcessModule(this Process obj, string moduleName)

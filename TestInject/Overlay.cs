@@ -3,12 +3,15 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
 using System.Linq;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Security;
 using System.Threading;
 using System.Windows.Forms;
 using static TestInject.Memory;
 using static TestInject.AssaultCube;
+using static TestInject.DebugConsole;
+using static TestInject.Memory.Enums;
 
 namespace TestInject
 {
@@ -64,7 +67,7 @@ namespace TestInject
 		[UnmanagedFunctionPointer(CallingConvention.Cdecl)]
 		public delegate int GetEntityInCrosshair();
 
-		public static GetEntityInCrosshair GetEntInCrosshair;
+		//public static GetEntityInCrosshair GetEntInCrosshair;
 
 		public class GDIControl
 		{
@@ -303,7 +306,7 @@ namespace TestInject
 				i++;
 			}
 
-			GetEntInCrosshair = Marshal.GetDelegateForFunctionPointer<GetEntityInCrosshair>(new IntPtr(0x004607C0));
+			SetupHooks();
 
 			Repositioner = new Thread(() => RepositionLoop(this));
 			Repositioner?.Start();
@@ -346,7 +349,7 @@ namespace TestInject
 				i++;
 			}
 
-			GetEntInCrosshair = Marshal.GetDelegateForFunctionPointer<GetEntityInCrosshair>(new IntPtr(0x004607C0));
+			SetupHooks();
 
 			Repositioner = new Thread(() => RepositionLoop(this));
 			Repositioner?.Start();
@@ -409,16 +412,20 @@ namespace TestInject
 						}
 					}
 				}
-
-				if (myMenu.GetValueByControlTag("autopistol") == "enabled")
-				{
-					if (localPlayer->WeaponPtr->AmmoInfo->CurrentAmmoCount > 0
-					    && IsKeyPushedDown(Keys.LButton))
-						localPlayer->IsShooting = 1;
-				}
 			}
 
 			Invalidate();
+		}
+
+		public void SetupHooks()
+		{
+			oGetPlayerInCrosshair = Detour.Hook<GetPlayerEntityInCrosshairDelegate>(
+			new IntPtr(0x004607C0),
+			GetPlayerEntityInCrosshair_HK,
+			6);
+
+			Log($"{(oGetPlayerInCrosshair == null ? $"Failed placing hook at 0x{0x004607C0:X8}" : $"Successfully placed hook at 0x{0x004607C0:X8}")}", 
+				oGetPlayerInCrosshair == null ? LogType.Error : LogType.Normal);
 		}
 
 		private void Overlay_Load(object sender, EventArgs e)
@@ -489,16 +496,23 @@ namespace TestInject
 
 			while (true)
 			{
-				PlayerEntity* inCrosshair = (PlayerEntity*)GetEntInCrosshair();
-				if (inCrosshair != null 
-				    && myMenu.GetValueByControlTag("triggerbot") == "enabled")
+				if (myMenu.GetValueByControlTag("triggerbot") == "enabled")
 				{
-					if (!localPlayer->IsInMyTeam(inCrosshair))
+					if (oGetPlayerInCrosshair == null)
+					{
+						Log($"Triggerbot - '{nameof(oGetPlayerInCrosshair)}' was null!", LogType.Error);
+						Thread.Sleep(500);
+						continue;
+					}
+
+					PlayerEntity* inCrosshair = (PlayerEntity*) oGetPlayerInCrosshair();
+
+					if (inCrosshair != null && localPlayer != null && !localPlayer->IsInMyTeam(inCrosshair))
 					{
 						if (inCrosshair->Health > 0 && inCrosshair->State == CState.CS_ALIVE
 						                            && localPlayer->Health > 0 && localPlayer->State == CState.CS_ALIVE)
 						{
-							localPlayer->IsShooting = GetEntInCrosshair() > 0 ? (byte)1 : (byte)0;
+							localPlayer->IsShooting = oGetPlayerInCrosshair() > 0 ? (byte)1 : (byte)0;
 						}
 					}
 				}
@@ -534,6 +548,24 @@ namespace TestInject
 
 				Thread.Sleep(25);
 			}
+		}
+		#endregion
+
+		#region Hooks
+		public static GetPlayerEntityInCrosshairDelegate oGetPlayerInCrosshair;
+		public delegate int GetPlayerEntityInCrosshairDelegate();
+
+		[MethodImpl(MethodImplOptions.NoOptimization)]
+		public static int GetPlayerEntityInCrosshair_HK()
+		{
+			if (oGetPlayerInCrosshair != null)
+			{
+				Log($"GetPlayerEntityInCrosshair_HK - Return Value: 0x{oGetPlayerInCrosshair():X8}");
+				return oGetPlayerInCrosshair();
+			}
+
+			Log($"GetPlayerEntityInCrosshair_HK - Delegate '{nameof(oGetPlayerInCrosshair)}' was null, returning 0", LogType.Error);
+			return 0x00000000;
 		}
 		#endregion
 	}

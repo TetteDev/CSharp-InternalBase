@@ -4,11 +4,19 @@ using System.Linq;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading.Tasks;
+using static TestInject.DebugConsole;
 
 namespace TestInject
 {
 	public class AssaultCube
 	{
+		public class Delegates
+		{
+			[UnmanagedFunctionPointer(CallingConvention.StdCall)]
+			public delegate int GetPlayerEntityInCrosshairDelegate();
+
+		}
+
 		[StructLayout(LayoutKind.Explicit)]
 		public unsafe struct PlayerEntity
 		{
@@ -102,8 +110,6 @@ namespace TestInject
 		public static unsafe class EntityList
 		{
 			public static List<IntPtr> PlayerList = new List<IntPtr>();
-
-
 			public static bool UpdatePlayerList()
 			{
 				if (PlayerList == null)
