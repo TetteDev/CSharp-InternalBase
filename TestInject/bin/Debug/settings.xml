@@ -18,10 +18,10 @@
       <ManualResolveImports>false</ManualResolveImports>
     </Advanced>
     <AutoInject>false</AutoInject>
-    <Background1>DodgerBlue</Background1>
-    <Background2>DeepSkyBlue</Background2>
+    <Background1>Black</Background1>
+    <Background2>Lime</Background2>
     <CloseOnInject>false</CloseOnInject>
-    <Delay>0</Delay>
+    <Delay>75</Delay>
     <DelayBetween>0</DelayBetween>
     <ErasePE>false</ErasePE>
     <HideModule>false</HideModule>

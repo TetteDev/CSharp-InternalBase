@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.Diagnostics;
@@ -11,6 +12,7 @@ using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Security;
 using System.Text;
+using System.Threading.Tasks;
 using static TestInject.Memory.Enums;
 using static TestInject.Memory.Structures;
 
@@ -104,7 +106,7 @@ namespace TestInject
 				private bool _disposed;
 				private GCHandle _selfGcHandle;
 
-				public bool IsImplemented;
+				public bool IsImplemented { get; private set; } = false;
 
 				public readonly IntPtr TargetAddress;
 
@@ -128,12 +130,12 @@ namespace TestInject
 
 					TargetAddress = targetAddress;
 					UnmodifiedOriginalFunction = Marshal.GetDelegateForFunctionPointer<T>(targetAddress);
-					_unmodifiedOriginalFunctionDelegateGcHandle = GCHandle.Alloc(UnmodifiedOriginalFunction);
+					_unmodifiedOriginalFunctionDelegateGcHandle = GCHandle.Alloc(UnmodifiedOriginalFunction/*, GCHandleType.Pinned*/);
 
 					_overwrittenByteCount = optionalPrologueLengthFixup;
 
 					HookMethod = hkDelegate;
-					_hookMethodGcHandle = GCHandle.Alloc(HookMethod, GCHandleType.Pinned);
+					_hookMethodGcHandle = GCHandle.Alloc(HookMethod/*, GCHandleType.Pinned*/);
 					HookMethodAddress = Marshal.GetFunctionPointerForDelegate(HookMethod);
 
 					_unmanagedAllocations = new List<IntPtr>();
@@ -471,7 +473,8 @@ namespace TestInject
 				PInvoke.SYSTEM_INFO si = new PInvoke.SYSTEM_INFO();
 				PInvoke.GetSystemInfo(ref si);
 
-				List<long> results = new List<long>();
+				ConcurrentBag<(IntPtr RegionBase, IntPtr RegionSize)> regions = new ConcurrentBag<(IntPtr RegionBase, IntPtr RegionSize)>(); 
+				ConcurrentQueue<long> results = new ConcurrentQueue<long>();
 
 				uint lpMem = (uint)si.lpMinimumApplicationAddress;
 				while (lpMem < (uint)si.lpMaximumApplicationAddress)
@@ -511,22 +514,27 @@ namespace TestInject
 							isValid &= isReadable || isWritable || isExecutable;
 
 							if (isValid)
-							{
-								long result = 0 - tmpPattern.LongLength;
-								do
-								{
-									result = HelperMethods.FindPattern((byte*)buff->BaseAddress, (int)buff->RegionSize, tmpPattern, tmpMask, result + tmpPattern.LongLength);
-									if (result >= 0)
-										results.Add((long)buff->BaseAddress + result);
-
-								} while (result != -1);
-							}
+								regions.Add((buff->BaseAddress, buff->RegionSize));
 						}
 
 						lpMem = (uint)buff->BaseAddress + (uint)buff->RegionSize;
 					}
 				}
-				return results;
+
+				Parallel.ForEach(regions, (currentRegion) =>
+				{
+					long result = 0 - tmpPattern.LongLength;
+					do
+					{
+						var (regionBase, regionSize) = currentRegion;
+						result = HelperMethods.FindPattern((byte*)regionBase, (int)regionSize, tmpPattern, tmpMask, result + tmpPattern.LongLength);
+						if (result >= 0)
+							results.Enqueue((long)regionBase + result);
+
+					} while (result != -1);
+				});
+
+				return results.ToList().OrderBy(address => address).ToList();
 			}
 		}
 

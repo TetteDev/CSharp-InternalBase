@@ -15,6 +15,9 @@ namespace TestInject
 			[UnmanagedFunctionPointer(CallingConvention.StdCall)]
 			public delegate int GetPlayerEntityInCrosshairDelegate();
 
+			[UnmanagedFunctionPointer(CallingConvention.Winapi)]
+			public delegate void glVertex3fDelegate(float x, float y, float z);
+
 		}
 
 		[StructLayout(LayoutKind.Explicit)]
