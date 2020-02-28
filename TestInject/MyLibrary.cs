@@ -35,8 +35,8 @@ namespace TestInject
 					MessageBoxIcon.Error);
 
 
-			//new Thread(SetUpHooks).Start();
-			//new Thread(() => new Overlay("AssaultCube").ShowDialog()).Start();
+			new Thread(SetUpHooks).Start();
+			new Thread(() => new Overlay("AssaultCube").ShowDialog()).Start();
 
 			Console.ReadLine();
 		}
