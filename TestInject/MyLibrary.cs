@@ -15,8 +15,12 @@ namespace TestInject
 {
 	public class MyLibrary
 	{
-		public static Detour.HookObj<GetPlayerEntityInCrosshairDelegate> obj;
+		public static Detour.HookObj<GetPlayerEntityInCrosshairDelegate> getPlayerInCrossHook;
+
 		public static Detour.HookObj<glVertex3fDelegate> glVertex3fHook;
+		public static Detour.HookObj<glEndDelegate> glEndHook;
+
+		public const bool IMPLEMENT_GL_HOOKS = true;
 
 		[DllExport("DllMain", CallingConvention.Cdecl)]
 		public static void EntryPoint()
@@ -30,61 +34,87 @@ namespace TestInject
 					MessageBoxButtons.OK,
 					MessageBoxIcon.Error);
 
+
+			//new Thread(SetUpHooks).Start();
 			//new Thread(() => new Overlay("AssaultCube").ShowDialog()).Start();
-
-			IntPtr openGlModule = Modules.GetModuleBaseAddress("opengl32.dll");
-			if (openGlModule == IntPtr.Zero)
-				Log($"Cannot find base address of 'opengl32.dll'", LogType.Error);
-			else
-			{
-				IntPtr glVertex3f = PInvoke.GetProcAddress(openGlModule, "glVertex3f");
-				if (glVertex3f != IntPtr.Zero)
-				{
-					Console.WriteLine($"Function 'glVertex3f': 0x{glVertex3f.ToInt32():X8}");
-					glVertex3fHook = new Detour.HookObj<glVertex3fDelegate>(glVertex3f,
-						glVertex3f_Hk,
-						11);
-
-					if (glVertex3fHook != null)
-						glVertex3fHook.Install();
-					else
-						Log($"Failed applying jmp hook at 0x{glVertex3f.ToInt32():X8}", LogType.Error);
-				}
-					
-				else
-					Log($"Failed getting base address of function 'glVertex3f' from module 'opengl32.dll'", LogType.Error);
-
-			}
-
-			/*
-			obj = new Detour.HookObj<GetPlayerEntityInCrosshairDelegate>(new IntPtr(0x004607C0), 
-				GetPlayerEntityInCrosshair_HK,
-				6,
-				true);
-			*/
 
 			Console.ReadLine();
 		}
 
+		public static void SetUpHooks()
+		{
+			if (IMPLEMENT_GL_HOOKS)
+			{
+				IntPtr openGlModule = Modules.GetModuleBaseAddress("opengl32.dll");
+				if (openGlModule == IntPtr.Zero)
+					Log($"Cannot find base address of 'opengl32.dll'", LogType.Error);
+				else
+				{
+					#region glEnd
+					IntPtr glEnd = PInvoke.GetProcAddress(openGlModule, "glEnd");
+					if (glEnd != IntPtr.Zero)
+					{
+						IntPtr glVertex3f = PInvoke.GetProcAddress(openGlModule, "glVertex3f");
+						glVertex3fHook = new Detour.HookObj<glVertex3fDelegate>(glVertex3f,
+							glVertex3f_Hk,
+							11);
+
+						// Do not call .Install() for glVertex3fHook
+						// We just use its .UnmodifiedOriginalFunction method inside glEnd to draw lines
+
+						glEndHook = new Detour.HookObj<glEndDelegate>(glEnd, glEnd_hk, 6);
+						if (!glEndHook.Install())
+							Log($"[glEnd] Failed applying jmp hook at 0x{glEnd.ToInt32():X8}", LogType.Error);
+						else
+							Log($"[glEnd] Successfully applied jmp hook at 0x{glEnd.ToInt32():X8}");
+					}
+					else
+						Log($"Failed getting base address of function 'glEnd' from module 'opengl32.dll'", LogType.Error);
+
+					#endregion
+				}
+			}
+
+			#region GetPlayerEntityInCrosshair
+			getPlayerInCrossHook = new Detour.HookObj<GetPlayerEntityInCrosshairDelegate>(new IntPtr(0x004607C0),
+				GetPlayerEntityInCrosshair_hk,
+				6);
+
+			// Can call .Install for getPlayerInCrossHook if you want
+			// Lets not implement the hook, and instead just keep it like this and call the function
+			// with getPlayerInCrossHook.UnmodifiedOriginalFunction() to get the player in our crosshair
+			#endregion
+
+			Console.WriteLine($"Thread 'SetUpHooks()' finished execution!");
+		}
 
 		[MethodImpl(MethodImplOptions.NoOptimization)]
 		public static void glVertex3f_Hk(float x, float y, float z)
 		{
-			Console.WriteLine("Inside glVertex3f_Hk\n" +
-			                  "	Parameters: \n" +
-			                  $"		* X: {x}\n" +
-			                  $"		* Y: {y}\n" +
-			                  $"		* Z: {z}\n" +
-			                  $"	Unmodified Function Call Address: 0x{Marshal.GetFunctionPointerForDelegate(glVertex3fHook.UnmodifiedOriginalFunction).ToInt32():X8}");
+			// Unused
 
 			glVertex3fHook.UnmodifiedOriginalFunction(x, y, z);
 		}
 
-		public static int GetPlayerEntityInCrosshair_HK()
+		public static void glEnd_hk()
 		{
-			Console.WriteLine($"GetPlayerEntityInCrosshair_HK - Return Value: 0x{obj.UnmodifiedOriginalFunction():X8}");
+			Console.WriteLine($"[{DateTime.Now.ToLongTimeString()}] Inside glEnd_hk");
 
-			return obj.UnmodifiedOriginalFunction();
+			// Draw here
+
+			// Lets draw a line?
+			/* FROM */ glVertex3fHook.UnmodifiedOriginalFunction(100, 100, 100);
+			/* TO */ glVertex3fHook.UnmodifiedOriginalFunction(200, 200, 200);
+
+			glEndHook.UnmodifiedOriginalFunction();
+		}
+
+		public static int GetPlayerEntityInCrosshair_hk()
+		{
+			// No real use for this hook, was just playing around
+			// can call
+
+			return getPlayerInCrossHook.UnmodifiedOriginalFunction();
 		}
 
 		static void CurrentDomain_UnhandledException(object sender, UnhandledExceptionEventArgs e)

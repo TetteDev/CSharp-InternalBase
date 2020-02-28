@@ -18,6 +18,8 @@ namespace TestInject
 			[UnmanagedFunctionPointer(CallingConvention.Winapi)]
 			public delegate void glVertex3fDelegate(float x, float y, float z);
 
+			[UnmanagedFunctionPointer(CallingConvention.Winapi)]
+			public delegate void glEndDelegate();
 		}
 
 		[StructLayout(LayoutKind.Explicit)]

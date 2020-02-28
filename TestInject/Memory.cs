@@ -140,7 +140,7 @@ namespace TestInject
 
 					_unmanagedAllocations = new List<IntPtr>();
 
-					_selfGcHandle = GCHandle.Alloc(this);
+					_selfGcHandle = GCHandle.Alloc(this/*, GCHandleType.Pinned*/);
 
 					if (implementImmediately)
 						Install();
@@ -550,7 +550,7 @@ namespace TestInject
 					return alloc;
 				}
 				
-				public static void ManagedFree(IntPtr address)
+				public static void ManagedFreeMemory(IntPtr address)
 					=> Marshal.FreeHGlobal(address);
 			}
 			public class Unmanaged
@@ -575,8 +575,8 @@ namespace TestInject
 			{
 				int res = PInvoke.VirtualQuery(baseAddress,
 					out pageinfo, 
-					(uint)Marshal.SizeOf<Structures.MEMORY_BASIC_INFORMATION>());
-				return res == Marshal.SizeOf<Structures.MEMORY_BASIC_INFORMATION>();
+					(uint)Marshal.SizeOf<MEMORY_BASIC_INFORMATION>());
+				return res == Marshal.SizeOf<MEMORY_BASIC_INFORMATION>();
 			}
 		}
 
@@ -592,9 +592,9 @@ namespace TestInject
 
 				foreach (ProcessThread pT in HostProcess.Threads)
 				{
-					if (AddressResidesWithinModule(pT.StartAddress, ourModule, "our module") ||
-					    AddressResidesWithinModule(pT.StartAddress, clrJit, "clrJit") ||
-					    AddressResidesWithinModule(pT.StartAddress, clr, "clr"))
+					if (HelperMethods.AddressResidesWithinModule(pT.StartAddress, ourModule, "our module") ||
+					    HelperMethods.AddressResidesWithinModule(pT.StartAddress, clrJit, "clrJit") ||
+					    HelperMethods.AddressResidesWithinModule(pT.StartAddress, clr, "clr"))
 						continue;
 
 					IntPtr pOpenThread = PInvoke.OpenThread(Enums.ThreadAccess.SUSPEND_RESUME, false, (uint)pT.Id);
@@ -638,7 +638,7 @@ namespace TestInject
 
 				foreach (ProcessThread pT in HostProcess.Threads)
 				{
-					if (AddressResidesWithinModule(pT.StartAddress, pModule, pModule.ModuleName))
+					if (HelperMethods.AddressResidesWithinModule(pT.StartAddress, pModule, pModule.ModuleName))
 					{
 						IntPtr pOpenThread = PInvoke.OpenThread(ThreadAccess.SUSPEND_RESUME, false, (uint)pT.Id);
 						if (pOpenThread == IntPtr.Zero)
@@ -656,7 +656,7 @@ namespace TestInject
 
 				foreach (ProcessThread pT in HostProcess.Threads)
 				{
-					if (AddressResidesWithinModule(pT.StartAddress, pModule, pModule.ModuleName))
+					if (HelperMethods.AddressResidesWithinModule(pT.StartAddress, pModule, pModule.ModuleName))
 					{
 						IntPtr pOpenThread = PInvoke.OpenThread(ThreadAccess.SUSPEND_RESUME, false, (uint)pT.Id);
 						if (pOpenThread == IntPtr.Zero)
@@ -679,7 +679,7 @@ namespace TestInject
 
 				foreach (ProcessThread pT in HostProcess.Threads)
 				{
-					if (AddressResidesWithinModule(pT.StartAddress, pModule, pModule.ModuleName))
+					if (HelperMethods.AddressResidesWithinModule(pT.StartAddress, pModule, pModule.ModuleName))
 					{
 						IntPtr pOpenThread = PInvoke.OpenThread(Enums.ThreadAccess.SUSPEND_RESUME, false, (uint)pT.Id);
 
@@ -700,7 +700,7 @@ namespace TestInject
 			{
 				foreach (ProcessThread pT in HostProcess.Threads)
 				{
-					if (AddressResidesWithinModule(pT.StartAddress, pModule, pModule.ModuleName))
+					if (HelperMethods.AddressResidesWithinModule(pT.StartAddress, pModule, pModule.ModuleName))
 					{
 						IntPtr pOpenThread = PInvoke.OpenThread(Enums.ThreadAccess.SUSPEND_RESUME, false, (uint)pT.Id);
 
@@ -716,15 +716,6 @@ namespace TestInject
 						PInvoke.CloseHandle(pOpenThread);
 					}
 				}
-			}
-
-			private static bool AddressResidesWithinModule(IntPtr address, ProcessModule processModule, string moduleDescriptor)
-			{
-				if (processModule == null)
-					throw new Exception($"AddressResidesWithinModule - Module with descriptor '{moduleDescriptor}' was null");
-
-				long modEnd = processModule.BaseAddress.ToInt64() + processModule.ModuleMemorySize;
-				return address.ToInt64() >= processModule.BaseAddress.ToInt64() && address.ToInt64() <= modEnd;
 			}
 		}
 
@@ -1473,6 +1464,15 @@ namespace TestInject
 			{
 				Debug.WriteLine($"WriteToFile - Failed writing contents to file '{Memory.HostProcess.ProcessName}_SessionLogs.txt'");
 			}
+		}
+
+		public static bool AddressResidesWithinModule(IntPtr address, ProcessModule processModule, string moduleDescriptor)
+		{
+			if (processModule == null)
+				throw new Exception($"AddressResidesWithinModule - Module with descriptor '{moduleDescriptor}' was null");
+
+			long modEnd = processModule.BaseAddress.ToInt64() + processModule.ModuleMemorySize;
+			return address.ToInt64() >= processModule.BaseAddress.ToInt64() && address.ToInt64() <= modEnd;
 		}
 	}
 
