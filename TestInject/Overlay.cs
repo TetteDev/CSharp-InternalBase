@@ -9,6 +9,7 @@ using System.Windows.Forms;
 using static TestInject.Memory;
 using static TestInject.CSGO;
 using static TestInject.CSGO.Structures;
+using static TestInject.Memory.Detours;
 
 namespace TestInject
 {
@@ -64,6 +65,9 @@ namespace TestInject
 		public static bool ShouldShow = true;
 		public static Brush Red = new SolidBrush(Color.Red);
 		public new static Font Font = new Font(FontFamily.GenericSerif, 16f, FontStyle.Bold);
+
+		public static Delegates.EndSceneDelegate endScene;
+		public static HookObj<Delegates.EndSceneDelegate> endSceneHook;
 
 		public static GMenu _menu;
 
@@ -145,6 +149,7 @@ namespace TestInject
 				_menu.DrawMenu(ref g);
 
 			// Draw here
+			/*
 			ClientState_t* client = Methods.GetClientState();
 			if (client != null && client->GameState == CSGO.Enums.GameState.GAME)
 			{
@@ -167,11 +172,12 @@ namespace TestInject
 
 				int x = 1;
 			}
+			*/
 
 			Invalidate();
 		}
 
-		private void Overlay_Load(object sender, EventArgs e)
+		private unsafe void Overlay_Load(object sender, EventArgs e)
 		{
 			BackColor = Color.Teal;
 			TransparencyKey = Color.Teal;
@@ -182,7 +188,22 @@ namespace TestInject
 				GetWindowLong(Handle, -20) | 0x80000 | 0x20);
 
 			CSGO.Modules.UpdateModules();
+
+			var ptrEndSceneFunc = Methods.DX9GetVTablePointerAtIndex(42);
+
+			if (ptrEndSceneFunc != null)
+			{
+
+				/*
+				endSceneHook = new HookObj<Delegates.EndSceneDelegate>(new IntPtr(*ptrEndSceneFunc),
+					EndScene_hk, 7, true);
+					*/
+
+				Console.WriteLine($"EndScene hook {(endSceneHook.IsImplemented ? "implemented successfully!" : " failed to implement ...")}");
+			}
 		}
+
+		
 
 		public static void RepositionLoop(Overlay formInstance)
 		{

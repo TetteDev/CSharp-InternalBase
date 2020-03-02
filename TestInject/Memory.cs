@@ -8,14 +8,15 @@ using System.Drawing;
 using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Net;
+using System.Net.Cache;
 using System.Reflection;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Security;
 using System.Text;
-using System.Threading;
 using System.Threading.Tasks;
-using System.Windows.Forms;
+using TestInject;
 
 namespace TestInject
 {
@@ -102,122 +103,256 @@ namespace TestInject
 
 		public class Detours
 		{
-			public static unsafe IntPtr JumpHook(IntPtr targetFunctionAddress, IntPtr hkAddress, int optPrologueLengthFixup = 5)
+			public unsafe class PrologueHook<T> : IDisposable where T : Delegate
 			{
-				IntPtr newRegion = Allocator.Unmanaged.Allocate(10 + (uint)(optPrologueLengthFixup - 5));
-				Protection.SetPageProtection(targetFunctionAddress, optPrologueLengthFixup, Enums.MemoryProtection.ExecuteReadWrite, out var initProtect);
+				public bool Enabled { get; private set; }
 
-				Writer.WriteBytes(newRegion, Reader.ReadBytes(targetFunctionAddress, (uint)optPrologueLengthFixup));
+				public IntPtr Target { get; private set; }
 
-				byte* t = (byte*)targetFunctionAddress;
-				*t = 0xe9;
-				t++;
-				*(uint*)t = ((uint)hkAddress - (uint)t - 4);
+				private Delegate HookMethod;
+				private bool PreserveBytes;
+				public byte[] OriginalBytes;
 
-				byte* nop = (byte*)(targetFunctionAddress + 5);
-				for (int n = 0; n < optPrologueLengthFixup - 5; n++)
+				public PrologueHook(IntPtr FunctionStartAddress, T HookDelegate,bool PreserveOverwrittenBytes = true, int numBytesPrologueLengthFixup = 5)
 				{
-					*nop = 0x90;
-					n++;
+					if (FunctionStartAddress == IntPtr.Zero)
+						throw new InvalidOperationException($"[PrologueHook] Parameter '{nameof(FunctionStartAddress)}' cannot be zero!");
+
+					if (numBytesPrologueLengthFixup < 5)
+						throw new InvalidOperationException($"[PrologueHook] Parameter '{nameof(numBytesPrologueLengthFixup)}' cannot be less than 0");
+
+					Target = FunctionStartAddress;
+					HookMethod = HookDelegate ?? throw new InvalidOperationException($"[PrologueHook] Parameter '{nameof(HookDelegate)}' cannot be null!");
+					PreserveBytes = PreserveOverwrittenBytes;
+
+					if (PreserveBytes)
+					{
+						OriginalBytes = new byte[numBytesPrologueLengthFixup];
+						Reader.ReadBytes(Target, (uint)numBytesPrologueLengthFixup);
+					}
 				}
 
-				Protection.SetPageProtection(targetFunctionAddress, optPrologueLengthFixup, initProtect, out _);
-				t = (byte*)newRegion + optPrologueLengthFixup;
-				*t = 0xe9;
-				t++;
 
-				*(uint*)t = ((uint)targetFunctionAddress - (uint)t + 1 + (uint)(optPrologueLengthFixup - 5));
-				Protection.SetPageProtection(newRegion, optPrologueLengthFixup, Enums.MemoryProtection.ExecuteRead, out _);
+				#region IDisposable Methods
+				private bool _disposed;
+				public void Dispose()
+				{
+					Dispose(true);
+					GC.SuppressFinalize(this);
+				}
+				protected virtual void Dispose(bool disposing)
+				{
+					if (!_disposed && disposing)
+					{
+						// Dispose
 
-				Console.WriteLine($"Original Function: 0x{newRegion.ToInt32():X8}");
-				Console.WriteLine($"Function to hook: 0x{targetFunctionAddress.ToInt32():X8}");
-				Console.WriteLine($"Our Hook: 0x{hkAddress.ToInt32():X8}");
-				return newRegion;
+						_disposed = true;
+					}
+				}
+				#endregion
 			}
 
-			public static unsafe IntPtr JmpHook(IntPtr targetFunctionAddress, Delegate hookDelegate, int optionalPrologueLength = 5)
+			
+			public class HookObj<T> : IDisposable where T : Delegate
 			{
-				/*
-				 * METHOD EXPLANATION
-				 * 1. Jump from 'targetfunctionAdddress' to 'hookFunctionAddressMiddleman'
-				 * 2. Overwrititen instruction(s) (by our jmp gets executed)
-				 * 3. Proceeds to jump to our hook function, done
-				 *
-				 * RETURN VALUE EXPLANATION
-				 * The returned value is a function pointer to the "original" or "unhooked" 'targetFunctionAddress'
-				 * Cast this into the appropriate function delegate and call it at the end of your hook
-				 */
+				private bool _disposed;
+				private GCHandle _selfGcHandle;
 
-				if (optionalPrologueLength < 5 || targetFunctionAddress == IntPtr.Zero || hookDelegate == null)
-					return IntPtr.Zero;
+				public bool IsImplemented { get; private set; } = false;
 
-				if (Environment.Is64BitProcess)
-					throw new InvalidOperationException($"JmpHook - Logic for X64 has not been implemented");
+				public readonly IntPtr TargetAddress;
 
-				IntPtr hookFunction = Marshal.GetFunctionPointerForDelegate(hookDelegate);
-				if (hookFunction == IntPtr.Zero)
-					return IntPtr.Zero;
+				public T UnmodifiedOriginalFunction;
+				private GCHandle _unmodifiedOriginalFunctionDelegateGcHandle;
 
-				IntPtr origFunctionAddress = Allocator.Unmanaged.Allocate((uint)optionalPrologueLength + 5);
-				if (origFunctionAddress == IntPtr.Zero)
-					return IntPtr.Zero;
+				public readonly T HookMethod;
+				public readonly IntPtr HookMethodAddress;
+				private GCHandle _hookMethodGcHandle;
 
-				if (!PInvoke.VirtualProtect(targetFunctionAddress, optionalPrologueLength, Enums.MemoryProtection.ExecuteReadWrite, out var oldProtect))
-					return IntPtr.Zero;
+				private readonly uint _overwrittenByteCount;
+				private List<IntPtr> _unmanagedAllocations;
 
-				int n = 0;
-				for (n = 0; n < optionalPrologueLength; n++)
+				public HookObj(IntPtr targetAddress, T hkDelegate, uint optionalPrologueLengthFixup = 5, bool implementImmediately = false)
 				{
-					// Copy N bytes from address we place our hook on to our 
-					*(byte*) (origFunctionAddress + n) = *(byte*) (targetFunctionAddress + n);
+					if (targetAddress == IntPtr.Zero || hkDelegate == null || optionalPrologueLengthFixup < 5)
+						throw new InvalidOperationException($"write something here");
+
+					if (Environment.Is64BitProcess)
+						throw new InvalidOperationException($"No 64Bit support has been Implemented!");
+
+					TargetAddress = targetAddress;
+					UnmodifiedOriginalFunction = Marshal.GetDelegateForFunctionPointer<T>(targetAddress);
+					_unmodifiedOriginalFunctionDelegateGcHandle = GCHandle.Alloc(UnmodifiedOriginalFunction/*, GCHandleType.Pinned*/);
+
+					_overwrittenByteCount = optionalPrologueLengthFixup;
+
+					HookMethod = hkDelegate;
+					_hookMethodGcHandle = GCHandle.Alloc(HookMethod/*, GCHandleType.Pinned*/);
+					HookMethodAddress = Marshal.GetFunctionPointerForDelegate(HookMethod);
+
+					_unmanagedAllocations = new List<IntPtr>();
+
+					_selfGcHandle = GCHandle.Alloc(this/*, GCHandleType.Pinned*/);
+
+					if (implementImmediately)
+						Install();
 				}
 
-				//n++;
-				*(byte*) (origFunctionAddress + n) = 0xE9;
-
-				// After we've written the original overwritten bytes into our originalFunctionAddress region
-				// write jump that jumps to the original function + however many bytes we over wrote for our jmp + nops (if optionalPrologueLength > 5)
-				n++;
-				//*(uint*) (origFunctionAddress + n) = HelperMethods.CalculateRelativeAddressForJmp((uint) (targetFunctionAddress + optionalPrologueLength), (uint) (origFunctionAddress + n));
-				*(uint*)(origFunctionAddress + n) = HelperMethods.CalculateRelativeAddressForJmp((uint)(origFunctionAddress + n), (uint)(targetFunctionAddress + optionalPrologueLength + (optionalPrologueLength - 5)));
-
-				IntPtr hookFunctionAddressMiddleman = Allocator.Unmanaged.Allocate((uint) optionalPrologueLength + 5);
-				if (hookFunctionAddressMiddleman == IntPtr.Zero)
-					return IntPtr.Zero;
-
-				n = 0;
-				for (n = 0; n < optionalPrologueLength; n++)
+				public unsafe bool Install()
 				{
-					// Copy N bytes from address we place our hook on to our middle man allocation
-					// Thus preserving the initial instruction(s) we overwrite in our hook
-					*(byte*)(hookFunctionAddressMiddleman + n) = *(byte*)(targetFunctionAddress + n);
+					if (_disposed) throw new NullReferenceException($"This object has been explicitly disposed already!");
+
+					if (!IsImplemented)
+					{
+						if (!Protection.SetPageProtection(TargetAddress, (int)_overwrittenByteCount, Enums.MemoryProtection.ExecuteReadWrite, out var oldProtect))
+							return false;
+
+						IntPtr addrMiddleMan = IntPtr.Zero;
+						IntPtr addrOFuncAddress = IntPtr.Zero;
+
+						if (_unmanagedAllocations != null && _unmanagedAllocations.Count == 2)
+						{
+							addrMiddleMan = _unmanagedAllocations[0];
+							addrOFuncAddress = _unmanagedAllocations[1];
+
+							// Maybe extra check to see if the actual values used are zero
+							// or not before actually using them?
+						}
+						else
+						{
+							addrMiddleMan = Allocator.Unmanaged.Allocate(_overwrittenByteCount + 5);
+							addrOFuncAddress = Allocator.Unmanaged.Allocate(_overwrittenByteCount + 5);
+
+							if (addrMiddleMan == IntPtr.Zero || addrOFuncAddress == IntPtr.Zero)
+							{
+								Protection.SetPageProtection(TargetAddress, (int)_overwrittenByteCount, oldProtect, out _);
+								return false;
+							}
+
+							_unmanagedAllocations = new List<IntPtr> { addrMiddleMan, addrOFuncAddress };
+						}
+
+						IntPtr addrHook = Marshal.GetFunctionPointerForDelegate(HookMethod);
+
+						if (addrMiddleMan == IntPtr.Zero ||
+							addrOFuncAddress == IntPtr.Zero ||
+							addrHook == IntPtr.Zero)
+						{
+							Protection.SetPageProtection(TargetAddress, (int)_overwrittenByteCount, oldProtect, out _);
+							if (addrMiddleMan != IntPtr.Zero)
+							{
+								Allocator.Unmanaged.FreeMemory(addrMiddleMan);
+								_unmanagedAllocations.Remove(addrMiddleMan);
+							}
+							if (addrOFuncAddress != IntPtr.Zero)
+							{
+								Allocator.Unmanaged.FreeMemory(addrOFuncAddress);
+								_unmanagedAllocations.Remove(addrOFuncAddress);
+							}
+							return false;
+						}
+
+						// Middleman -> Hook
+						for (int n = 0; n < _overwrittenByteCount; n++)
+							*(byte*)(addrMiddleMan + n) = *(byte*)(TargetAddress + n);
+
+						*(byte*)((uint)addrMiddleMan + _overwrittenByteCount) = 0xE9;
+						*(uint*)((uint)addrMiddleMan + _overwrittenByteCount + 1) = HelperMethods.CalculateRelativeAddressForJmp(
+							(uint)addrMiddleMan + _overwrittenByteCount,
+							(uint)addrHook);
+
+						// Original Function Address Copy Region -> (Target Address + optionalPrologueLength)
+						for (int n = 0; n < _overwrittenByteCount; n++)
+							*(byte*)(addrOFuncAddress + n) = *(byte*)(TargetAddress + n);
+
+						*(byte*)((uint)addrOFuncAddress + _overwrittenByteCount) = 0xE9;
+						*(uint*)((uint)addrOFuncAddress + _overwrittenByteCount + 1) = HelperMethods.CalculateRelativeAddressForJmp(
+							(uint)addrOFuncAddress + _overwrittenByteCount,
+							(uint)TargetAddress + _overwrittenByteCount);
+
+						// Target -> Middleman
+						*(byte*)TargetAddress = 0xE9;
+						*(uint*)(TargetAddress + 1) = HelperMethods.CalculateRelativeAddressForJmp((uint)TargetAddress, (uint)addrMiddleMan);
+
+						for (int n = 0; n < _overwrittenByteCount - 5; n++)
+							*(byte*)(TargetAddress + 5 + n) = 0x90;
+
+						Protection.SetPageProtection(TargetAddress, (int)_overwrittenByteCount, oldProtect, out _);
+
+						UnmodifiedOriginalFunction = Marshal.GetDelegateForFunctionPointer<T>(_unmanagedAllocations[1]);
+						if (_unmodifiedOriginalFunctionDelegateGcHandle.IsAllocated)
+							_unmodifiedOriginalFunctionDelegateGcHandle.Free();
+
+						_unmodifiedOriginalFunctionDelegateGcHandle = GCHandle.Alloc(_unmodifiedOriginalFunctionDelegateGcHandle, GCHandleType.Pinned);
+
+						IsImplemented = true;
+						return IsImplemented;
+					}
+
+					return true;
+				}
+				public unsafe bool Uninstall()
+				{
+					if (_disposed) throw new NullReferenceException($"This object has been explicitly disposed already!");
+
+					if (IsImplemented)
+					{
+						// Restore
+						if (!Protection.SetPageProtection(TargetAddress, (int)_overwrittenByteCount, Enums.MemoryProtection.ExecuteReadWrite, out var oldProtect))
+							return false;
+
+						for (int n = 0; n < _overwrittenByteCount; n++)
+							*(byte*)(TargetAddress + n) = *(byte*)(_unmanagedAllocations[1] + n);
+
+						Protection.SetPageProtection(TargetAddress, (int)_overwrittenByteCount, oldProtect, out _);
+
+						UnmodifiedOriginalFunction = Marshal.GetDelegateForFunctionPointer<T>(TargetAddress);
+						if (_unmodifiedOriginalFunctionDelegateGcHandle.IsAllocated)
+							_unmodifiedOriginalFunctionDelegateGcHandle.Free();
+
+						_unmodifiedOriginalFunctionDelegateGcHandle = GCHandle.Alloc(UnmodifiedOriginalFunction, GCHandleType.Pinned);
+
+						IsImplemented = false;
+						return !IsImplemented;
+					}
+
+					return false;
 				}
 
+				public void Dispose()
+				{
+					Dispose(true);
+					GC.SuppressFinalize(this);
+				}
+				protected virtual void Dispose(bool disposing)
+				{
+					if (!_disposed && disposing)
+					{
+						if (IsImplemented)
+							Uninstall();
 
-				// Jump to our hook function from the middleman region
-				//n++;
-				*(byte*)(hookFunctionAddressMiddleman + n) = 0xE9;
+						if (_unmanagedAllocations != null)
+							foreach (IntPtr allocationBaseAddress in _unmanagedAllocations)
+								Allocator.Unmanaged.FreeMemory(allocationBaseAddress);
 
-				n++;
-				//*(uint*) (hookFunctionAddressMiddleman + n) = HelperMethods.CalculateRelativeAddressForJmp((uint)hookFunction, (uint)(hookFunctionAddressMiddleman + n));
-				*(uint*)(hookFunctionAddressMiddleman + n) = HelperMethods.CalculateRelativeAddressForJmp((uint)(hookFunctionAddressMiddleman + n - 1), (uint)hookFunction);
+						if (_hookMethodGcHandle.IsAllocated)
+							_hookMethodGcHandle.Free();
 
-				// Jump from our target function to our middle man region
-				*(byte*) targetFunctionAddress = 0xE9;
-				*(uint*)(targetFunctionAddress + 1) = HelperMethods.CalculateRelativeAddressForJmp((uint)targetFunctionAddress, (uint)hookFunctionAddressMiddleman);
+						if (_unmodifiedOriginalFunctionDelegateGcHandle.IsAllocated)
+							_unmodifiedOriginalFunctionDelegateGcHandle.Free();
 
-				int nopsNeeded = optionalPrologueLength - 5;
-				for (n = 0; n < nopsNeeded; n++)
-					*(byte*)(targetFunctionAddress + 4 + (n + 1)) = 0x90;
+						if (_selfGcHandle.IsAllocated)
+							_selfGcHandle.Free();
 
-				PInvoke.VirtualProtect(targetFunctionAddress, optionalPrologueLength, oldProtect, out _);
-				return origFunctionAddress;
+						_disposed = true;
+					}
+				}
 			}
 		}
 
 		public class Pattern
 		{
-			public static unsafe ulong FindPattern(string processModule, string pattern, bool resultAbsolute = true)
+			public static unsafe ulong FindPatternExecutable(string processModule, string pattern, bool resultAbsolute = true)
 			{
 				UpdateProcessInformation();
 
@@ -290,6 +425,207 @@ namespace TestInject
 					} while (result != -1);
 				}
 				return 0;
+			}
+
+			public static unsafe List<long> FindPattern(string pattern, string optionalModuleName = "", bool readable = true, bool writable = true, bool executable = true)
+			{
+				#region Creation of Byte Array from string pattern
+				var tmpSplitPattern = pattern.TrimStart(' ').TrimEnd(' ').Split(' ');
+				var tmpPattern = new byte[tmpSplitPattern.Length];
+				var tmpMask = new byte[tmpSplitPattern.Length];
+
+				for (var i = 0; i < tmpSplitPattern.Length; i++)
+				{
+					var ba = tmpSplitPattern[i];
+
+					if (ba == "??" || ba.Length == 1 && ba == "?")
+					{
+						tmpMask[i] = 0x00;
+						tmpSplitPattern[i] = "0x00";
+					}
+					else if (char.IsLetterOrDigit(ba[0]) && ba[1] == '?')
+					{
+						tmpMask[i] = 0xF0;
+						tmpSplitPattern[i] = ba[0] + "0";
+					}
+					else if (char.IsLetterOrDigit(ba[1]) && ba[0] == '?')
+					{
+						tmpMask[i] = 0x0F;
+						tmpSplitPattern[i] = "0" + ba[1];
+					}
+					else
+					{
+						tmpMask[i] = 0xFF;
+					}
+				}
+
+
+				for (var i = 0; i < tmpSplitPattern.Length; i++)
+					tmpPattern[i] = (byte)(Convert.ToByte(tmpSplitPattern[i], 16) & tmpMask[i]);
+
+				if (tmpMask.Length != tmpPattern.Length)
+					throw new ArgumentException($"{nameof(pattern)}.Length != {nameof(tmpMask)}.Length");
+				#endregion
+
+				Structures.SYSTEM_INFO si = new Structures.SYSTEM_INFO();
+				PInvoke.GetSystemInfo(ref si);
+
+				ConcurrentBag<(IntPtr RegionBase, IntPtr RegionSize)> regions = new ConcurrentBag<(IntPtr RegionBase, IntPtr RegionSize)>();
+				ConcurrentQueue<long> results = new ConcurrentQueue<long>();
+
+				ProcessModule pm = null;
+				if (optionalModuleName != "")
+				{
+					UpdateProcessInformation();
+					pm = HostProcess.FindProcessModule(optionalModuleName);
+					if (pm == null)
+						throw new Exception($"Cannot find module '{optionalModuleName}'");
+				}
+
+				uint lpMem = (pm != null && optionalModuleName != "") 
+					? (uint)pm.BaseAddress 
+					: (uint) si.lpMinimumApplicationAddress;
+
+				if (lpMem < (uint) si.lpMinimumApplicationAddress)
+					lpMem = (uint) si.lpMinimumApplicationAddress;
+
+				uint maxAddress = (pm != null && optionalModuleName != ""
+					? (uint) (pm.BaseAddress + pm.ModuleMemorySize)
+					: (uint) si.lpMaximumApplicationAddress);
+
+				if (maxAddress > (uint) si.lpMaximumApplicationAddress)
+					maxAddress = (uint) si.lpMaximumApplicationAddress;
+
+				//uint lpMem = (uint)si.lpMinimumApplicationAddress;
+
+					// while (lpMem < ((uint)si.lpMaximumApplicationAddress))
+				while (lpMem < maxAddress)
+				{
+					if (PInvoke.VirtualQuery((IntPtr)lpMem,
+							out Structures.MEMORY_BASIC_INFORMATION lpBuffer,
+							(uint)Marshal.SizeOf<Structures.MEMORY_BASIC_INFORMATION>()) != 0)
+					{
+						var buff = &lpBuffer;
+
+						bool isValid = buff->State == Enums.MemoryState.MEM_COMMIT;
+						isValid &= (uint)(buff->BaseAddress) < (uint)si.lpMaximumApplicationAddress;
+						isValid &= ((buff->Protect & Enums.MemoryProtection.GuardModifierflag) == 0);
+						isValid &= ((buff->Protect & Enums.MemoryProtection.NoAccess) == 0);
+						isValid &= (buff->Type == Enums.MemoryType.MEM_PRIVATE) || (buff->Type == Enums.MemoryType.MEM_IMAGE);
+
+						if (isValid)
+						{
+							bool isReadable = (buff->Protect & Enums.MemoryProtection.ReadOnly) > 0;
+
+
+
+							bool isWritable = ((buff->Protect & Enums.MemoryProtection.ReadWrite) > 0) ||
+											  ((buff->Protect & Enums.MemoryProtection.WriteCopy) > 0) ||
+											  ((buff->Protect & Enums.MemoryProtection.ExecuteReadWrite) > 0) ||
+											  ((buff->Protect & Enums.MemoryProtection.ExecuteWriteCopy) > 0);
+
+							bool isExecutable = ((buff->Protect & Enums.MemoryProtection.Execute) > 0) ||
+												((buff->Protect & Enums.MemoryProtection.ExecuteRead) > 0) ||
+												((buff->Protect & Enums.MemoryProtection.ExecuteReadWrite) > 0) ||
+												((buff->Protect & Enums.MemoryProtection.ExecuteWriteCopy) > 0);
+
+							isReadable &= readable;
+							isWritable &= writable;
+							isExecutable &= executable;
+
+							isValid &= isReadable || isWritable || isExecutable;
+
+							if (isValid)
+								regions.Add((buff->BaseAddress, buff->RegionSize));
+						}
+
+						lpMem = (uint)buff->BaseAddress + (uint)buff->RegionSize;
+					}
+				}
+
+				Parallel.ForEach(regions, (currentRegion) =>
+				{
+					long result = 0 - tmpPattern.LongLength;
+					do
+					{
+						var (regionBase, regionSize) = currentRegion;
+						result = HelperMethods.FindPattern((byte*)regionBase, (int)regionSize, tmpPattern, tmpMask, result + tmpPattern.LongLength);
+						if (result >= 0)
+							results.Enqueue((long)regionBase + result);
+
+					} while (result != -1);
+				});
+
+				return results.ToList().OrderBy(address => address).ToList();
+			}
+
+		}
+
+		public class Assembler
+		{
+			public static bool AssembleMnemonics(string[] assemblycode, bool isX86, out byte[] assembled)
+			{
+				if (assemblycode == null || assemblycode.Length < 1) throw new Exception("bla bla bla shit went wrong");
+				
+				var request = (HttpWebRequest)WebRequest.Create("https://defuse.ca/online-x86-assembler.htm");
+
+				var postData = $"instructions={string.Join("\n", assemblycode)}";
+				postData += $"&arch={(isX86 ? "x86" : "x64")}";
+				postData += "&submit=Assemble";
+
+				var data = Encoding.UTF8.GetBytes(postData);
+
+				request.Method = "POST";
+				request.Credentials = CredentialCache.DefaultCredentials;
+				request.Accept = "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.9";
+				request.UserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/80.0.3987.122 Safari/537.3";
+				request.Referer = "https://defuse.ca/online-x86-assembler.htm";
+				request.ContentType = "application/x-www-form-urlencoded";
+				request.ContentLength = data.Length;
+				request.CachePolicy = new RequestCachePolicy(RequestCacheLevel.NoCacheNoStore);
+				request.Host = "defuse.ca";
+				request.KeepAlive = true;
+				request.AutomaticDecompression = DecompressionMethods.Deflate | DecompressionMethods.GZip;
+
+				request.Headers.Add("Upgrade-Insecure-Requests", @"1");
+				request.Headers.Add("DNT", @"1");
+				request.Headers.Add("Origin", "https://defuse.ca");
+
+				request.Headers.Set(HttpRequestHeader.AcceptEncoding, "gzip, deflate, br");
+				request.Headers.Set(HttpRequestHeader.AcceptLanguage, "en-SE,en;q=0.9,sv-SE;q=0.8,sv;q=0.7,en-US;q=0.6");
+
+				using (var stream = request.GetRequestStream())
+				{
+					stream.Write(data, 0, data.Length);
+				}
+
+				var response = (HttpWebResponse)request.GetResponse();
+				var responseString = new StreamReader(response.GetResponseStream() ?? throw new InvalidOperationException("ResponseStream was null!")).ReadToEnd();
+
+				try
+				{
+					int startIdx = responseString.IndexOf("{ ", StringComparison.Ordinal);
+					int endIdx = responseString.IndexOf(" }                </p>", StringComparison.Ordinal);
+					string extracted = responseString.Substring(startIdx + 2, endIdx - startIdx - 2);
+					string[] arr = extracted.Split(',');
+
+					List<byte> ret = new List<byte>();
+					foreach (string strByte in arr)
+					{
+						ret.Add(Convert.ToByte(strByte.Replace(" ", string.Empty), 16));
+					}
+
+					assembled = ret.ToArray();
+					return response.StatusCode == HttpStatusCode.OK && responseString.Contains("Array Literal") && assembled.Length > 0;
+				}
+				catch
+				{
+					if (responseString.Contains("Error:")) {
+						// Parse out error code
+					}
+					assembled = null;
+					return false;
+				}
 			}
 		}
 
@@ -401,6 +737,35 @@ namespace TestInject
 
 		public class Structures
 		{
+			[StructLayout(LayoutKind.Sequential)]
+			public unsafe struct Registers
+			{
+				public readonly int EAX; // 0
+				public readonly int EBX; // 4
+				public readonly int ECX; // 8
+				public readonly int EDX; // 12
+				public readonly int EDI; // 16
+				public readonly int ESI; // 20
+				public readonly int EBP; // 24
+				public readonly int ESP; // 28
+			}
+
+			[StructLayout(LayoutKind.Sequential)]
+			internal struct SYSTEM_INFO
+			{
+				internal ushort wProcessorArchitecture;
+				internal ushort wReserved;
+				internal uint dwPageSize;
+				internal IntPtr lpMinimumApplicationAddress;
+				internal IntPtr lpMaximumApplicationAddress;
+				internal IntPtr dwActiveProcessorMask;
+				internal uint dwNumberOfProcessors;
+				internal uint dwProcessorType;
+				internal uint dwAllocationGranularity;
+				internal ushort wProcessorLevel;
+				internal ushort wProcessorRevision;
+			}
+
 			[StructLayout(LayoutKind.Sequential)]
 			public struct Vector4
 			{
@@ -882,6 +1247,10 @@ namespace TestInject
 			public static extern IntPtr GetProcAddress(IntPtr hModule, string procName);
 
 			[DllImport("kernel32.dll", SetLastError = true)]
+
+			internal static extern void GetSystemInfo(ref Structures.SYSTEM_INFO Info);
+
+			[DllImport("kernel32.dll", SetLastError = true)]
 			public static extern IntPtr VirtualAlloc(IntPtr lpAddress, UIntPtr dwSize, Enums.AllocationType lAllocationType, Enums.MemoryProtection flProtect);
 
 			[DllImport("kernel32.dll", SetLastError = true, ExactSpelling = true)]
@@ -1022,7 +1391,8 @@ namespace TestInject
 			string formattedContent = $"[UNHANDLED_EXCEPTION] Caught Exception of type {actualType}\n\n" +
 									  $"Exception Message: {exceptionObject.Message}\n" +
 									  $"Exception Origin File/Module: {exceptionObject.Source}\n" +
-									  $"Method that threw the Exception: {formatedMethodNameAndParameters}\n";
+									  $"Method that threw the Exception: {formatedMethodNameAndParameters}\n" +
+									  $"Line Number: {lineNumber}\n";
 
 			Console.WriteLine(formattedContent);
 
@@ -1099,7 +1469,42 @@ namespace TestInject
 
 	public static class ByteArrayExtensions
 	{
-		
+		public static byte[] FromHexCE(this byte[] destination, string CEStyleHexString)
+		{
+			if (string.IsNullOrEmpty(CEStyleHexString))
+				return null;
+			// Expects CE styled string array
+
+			string[] split = CEStyleHexString.TrimStart().TrimEnd().Split(' ');
+			byte[] ret = new byte[split.Length];
+
+			for (int n = 0; n < split.Length; n++)
+			{
+				ret[n] = Convert.ToByte(split[n], 16);
+			}
+				
+
+			return ret;
+		}
+
+		public static byte[] FromHexIDA(this byte[] destination, string IStyleHexString)
+		{
+			if (string.IsNullOrEmpty(IStyleHexString))
+				return null;
+			// Expects CE styled string array
+
+			string[] split = IStyleHexString.TrimStart().TrimEnd().Split(new [] { "\\x" }, StringSplitOptions.None);
+			byte[] ret = new byte[split.Length];
+
+			for (int n = 0; n < split.Length; n++)
+			{
+				ret[n] = Convert.ToByte(split[n], 16);
+			}
+
+
+			return ret;
+		}
+
 	}
 
 	public static class GraphicsExtensions

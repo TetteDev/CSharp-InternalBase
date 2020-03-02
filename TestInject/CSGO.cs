@@ -1,9 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
-using System.Linq;
 using System.Runtime.InteropServices;
-using System.Text;
-using System.Threading.Tasks;
 using static TestInject.CSGO.Structures;
 using static TestInject.Memory.Structures;
 
@@ -39,7 +36,38 @@ namespace TestInject
 
 			public static unsafe GlobalVars_t* GetGlobalVars()
 				=> (GlobalVars_t*)*(uint*)(Modules.Engine + Offsets.signatures.dwGlobalVars);
+
+			public static unsafe uint* GetDevicePointer()
+				=> (uint*)(Memory.Pattern.FindPatternExecutable("shaderapidx9.dll", "B9 ?? ?? ?? ?? E8 E5 BD FF FF A1 ?? ?? ?? ??") + 1);
+
+			public static unsafe uint* DX9GetVTablePointerAtIndex(int index = 42 /* EndScene */)
+			{
+				List<long> result = Memory.Pattern.FindPattern(
+					"56 8B F1 E8 ?? ?? ?? ?? 33 C0 C7 06 ?? ?? ?? ?? 89 86 ?? ?? 00 00",
+					"d3d9.dll", true, false, true);
+
+				if (result.Count > 0)
+				{
+					uint VTable = *(uint*) (result[0] + 12);
+					if (VTable == 0)
+						return null;
+
+					uint* pVTableItem = (uint*) (VTable + (index * sizeof(IntPtr)));
+					return pVTableItem;
+				}
+
+				return null;
+			}
 		}
+
+		public class Delegates
+		{
+			[UnmanagedFunctionPointer(CallingConvention.StdCall,
+				CharSet = CharSet.Unicode, 
+				SetLastError = true)]
+			public delegate void EndSceneDelegate(IntPtr pDevice);
+		}
+
 
 		public class Structures
 		{
@@ -151,6 +179,34 @@ namespace TestInject
 				[FieldOffset(Offsets.netvars.m_bSpottedByMask)] public bool SpottedByMask;
 
 				[FieldOffset(Offsets.netvars.m_vecOrigin)] public Vector3 Origin;
+			}
+
+			public unsafe struct IDIRECT3D9DEVICE
+			{
+				public IntPtr pDevice;
+
+				public IDIRECT3D9DEVICE(IntPtr pDevice)
+				{
+					this.pDevice = pDevice;
+				}
+
+				public IntPtr GetVTablePointerAtIndex(int index)
+				{
+					if (pDevice == IntPtr.Zero)
+						return IntPtr.Zero;
+
+					uint* pVTableList = (uint*)pDevice;
+					uint* pVTableItem = (uint*)pVTableList[index * Marshal.SizeOf<IntPtr>()];
+					return new IntPtr(pVTableItem);
+				}
+
+				public void* ToPointer()
+				{
+					fixed (void* ptr = &this)
+					{
+						return ptr;
+					}
+				}
 			}
 		}
 
