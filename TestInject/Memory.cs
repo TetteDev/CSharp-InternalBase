@@ -17,6 +17,8 @@ using System.Security;
 using System.Text;
 using System.Threading.Tasks;
 using TestInject;
+using Iced.Intel;
+using static Iced.Intel.AssemblerRegisters;
 
 namespace TestInject
 {
@@ -152,7 +154,280 @@ namespace TestInject
 				#endregion
 			}
 
-			
+			public unsafe class Hook<T> where T : Delegate
+			{
+				public readonly IntPtr Target;
+				public bool IsEnabled;
+
+				public T Original;
+				private GCHandle origHandle;
+
+				private GCHandle hookHandle;
+				private Delegate hook;
+
+				private byte[] originalBytes;
+				private bool compabilityModeEnabled;
+				public RegisterStates RegisterStates;
+				private int numBytes;
+
+				private IntPtr middleman;
+				private IntPtr origFunc;
+
+
+				public Hook(IntPtr target, Delegate hook, bool compabilityMode = true, int prologueLengthFixup = 5)
+				{
+					if (prologueLengthFixup < 5)
+						throw new InvalidOperationException($"Need atleast 5 bytes");
+
+					if (target == IntPtr.Zero)
+						throw new InvalidOperationException($"Target cannot be null");
+
+					this.hook = hook ?? throw new InvalidOperationException($"Hook cannot be null");
+					hookHandle = GCHandle.Alloc(hook, GCHandleType.Normal);
+					compabilityModeEnabled = compabilityMode;
+					RegisterStates = compabilityModeEnabled ? new RegisterStates() : null;
+
+					if (compabilityMode && RegisterStates != null)
+					{
+						RegisterStates.GeneratePopFd(true);
+						RegisterStates.GeneratePushFd(true);
+
+						RegisterStates.GeneratePushAd(true);
+						RegisterStates.GeneratePopAd(true);
+					}
+
+					Target = target;
+					numBytes = prologueLengthFixup;
+					originalBytes = Reader.ReadBytes(Target, (uint)numBytes);
+
+					middleman = Allocator.Unmanaged.Allocate(5 + (uint)prologueLengthFixup + 
+					                                         (compabilityMode ? (uint)RegisterStates.PushAdBytes.Length + (uint)RegisterStates.PushFdBytes.Length : 0));
+					if (middleman == IntPtr.Zero)
+						throw new InvalidOperationException($"Failed to allocate memory for middleman");
+
+					origFunc = Allocator.Unmanaged.Allocate(5 + (uint) prologueLengthFixup + 
+					                                        (compabilityMode ? (uint) RegisterStates.PopAdBytes.Length + (uint)RegisterStates.PopFdBytes.Length : 0));
+					if (origFunc == IntPtr.Zero)
+					{
+						if (middleman != IntPtr.Zero)
+							Allocator.Unmanaged.FreeMemory(middleman);
+
+						throw new InvalidOperationException($"Failed allocating memory for orig func");
+					}
+
+					Original = Marshal.GetDelegateForFunctionPointer<T>(Target);
+					origHandle = GCHandle.Alloc(Original, GCHandleType.Normal);
+
+					Console.Title = $"Middleman: 0x{middleman.ToInt32():X8}, Orig Func: 0x{origFunc.ToInt32():X8}";
+					Console.WriteLine($"Middleman: 0x{middleman.ToInt32():X8}, Orig Func: 0x{origFunc.ToInt32():X8}");
+				}
+
+				public bool Install()
+				{
+					if (IsEnabled)
+						return false;
+
+					Protection.SetPageProtection(Target, numBytes, Enums.MemoryProtection.ExecuteReadWrite, out var oldProtection);
+
+					int offset = 0;
+					// Middleman to hook
+					if (compabilityModeEnabled)
+					{
+						Writer.WriteBytes(middleman, RegisterStates.PushAdBytes);
+						offset += RegisterStates.PushAdBytes.Length;
+
+						Writer.WriteBytes(middleman + offset, RegisterStates.PushFdBytes);
+						offset += RegisterStates.PushFdBytes.Length;
+					}
+
+					Writer.WriteBytes(middleman + offset, originalBytes);
+					offset += originalBytes.Length;
+
+					*(byte*) (middleman + offset) = 0xE9;
+					*(uint*) (middleman + offset + 1) = HelperMethods.CalculateRelativeAddressForJmp((uint) (middleman + offset), (uint) Marshal.GetFunctionPointerForDelegate(hook));
+
+					// Orig func region to original func
+					offset = 0;
+					if (compabilityModeEnabled)
+					{
+						Writer.WriteBytes(origFunc, RegisterStates.PopAdBytes);
+						offset += RegisterStates.PopAdBytes.Length;
+
+						Writer.WriteBytes(origFunc + offset, RegisterStates.PopFdBytes);
+						offset += RegisterStates.PopFdBytes.Length;
+					}
+
+					Writer.WriteBytes(origFunc + offset, originalBytes);
+					offset += originalBytes.Length;
+
+					*(byte*) (origFunc + offset) = 0xE9;
+					*(uint*) (origFunc + offset + 1) = HelperMethods.CalculateRelativeAddressForJmp((uint) (origFunc + offset), (uint)(Target + numBytes));
+
+					Original = Marshal.GetDelegateForFunctionPointer<T>(origFunc);
+					if (origHandle.IsAllocated)
+						origHandle.Free();
+					origHandle = GCHandle.Alloc(Original, GCHandleType.Normal);
+
+					// Target To Middleman
+					*(byte*)Target = 0xE9;
+					*(uint*)(Target + 1) = HelperMethods.CalculateRelativeAddressForJmp((uint)Target, (uint)middleman);
+
+					for (int n = 0; n < numBytes - 5; n++)
+						*(byte*)((Target + 5) + n) = 0x90;
+
+
+					Protection.SetPageProtection(Target, numBytes, oldProtection, out _);
+					IsEnabled = true;
+					return IsEnabled;
+				}
+
+				public bool Uninstall()
+				{
+					if (!IsEnabled)
+						return false;
+
+
+					IsEnabled = false;
+					return IsEnabled;
+				}
+			}
+			public unsafe class RegisterStates
+			{
+				// Manually saving values of all general purpose registers and EFLAGS
+				// Instead of using PushAD/PushFD (and PopAD & PopFD)
+
+				public IntPtr BaseAddress;
+
+				public byte[] PushAdBytes { get; private set; }
+				public byte[] PopAdBytes { get; private set; }
+				public byte[] PopFdBytes { get; private set; }
+				public byte[] PushFdBytes { get; private set; }
+
+				public Structures.Registers* RegisterStructPointer { get; private set; }
+
+				public RegisterStates()
+				{
+					BaseAddress = Allocator.Unmanaged.Allocate((uint)Marshal.SizeOf<Structures.Registers>(),
+						Enums.AllocationType.Commit | Enums.AllocationType.Reserve,
+						Enums.MemoryProtection.ReadWrite);
+					if (BaseAddress == IntPtr.Zero)
+						throw new InvalidOperationException();
+
+					RegisterStructPointer = (Structures.Registers*)BaseAddress;
+				}
+
+				// Pushad
+				public byte[] GeneratePushAd(bool force = false)
+				{
+					if (PushAdBytes != null && PushAdBytes.Length > 0 && !force)
+						return PushAdBytes;
+
+					// Generate mnemonics here
+
+					bool assembleResult = Assembler.AssembleMnemonics(new[]
+					{
+					$"mov dword ptr [0x{BaseAddress.ToInt32():X8}], eax",
+					$"mov dword ptr [0x{BaseAddress.ToInt32() + 4:X8}], ebx",
+					$"mov dword ptr [0x{BaseAddress.ToInt32() + 8:X8}], ecx",
+					$"mov dword ptr [0x{BaseAddress.ToInt32() + 12:X8}], edx",
+					$"mov dword ptr [0x{BaseAddress.ToInt32() + 16:X8}], edi",
+					$"mov dword ptr [0x{BaseAddress.ToInt32() + 20:X8}], esi",
+					$"mov dword ptr [0x{BaseAddress.ToInt32() + 24:X8}], ebp",
+					$"mov dword ptr [0x{BaseAddress.ToInt32() + 28:X8}], esp"
+				}, true, out byte[] assembled);
+
+					if (assembleResult)
+					{
+						PushAdBytes = assembled;
+						return PushAdBytes;
+					}
+
+					throw new InvalidOperationException();
+				}
+
+				// Popad
+				public byte[] GeneratePopAd(bool force = false)
+				{
+					if (PopAdBytes != null && PopAdBytes.Length > 0 && !force)
+						return PopAdBytes;
+
+					bool assembleResult = Assembler.AssembleMnemonics(new[]
+					{
+					/*
+					$"mov dword ptr [eax], 0x{BaseAddress.ToInt32():X8}",
+					$"mov dword ptr [ebx], 0x{BaseAddress.ToInt32() + 4:X8}",
+					$"mov dword ptr [ecx], 0x{BaseAddress.ToInt32() + 8:X8}",
+					$"mov dword ptr [edx], 0x{BaseAddress.ToInt32() + 12:X8}",
+					$"mov dword ptr [edi], 0x{BaseAddress.ToInt32() + 16:X8}",
+					$"mov dword ptr [esi], 0x{BaseAddress.ToInt32() + 20:X8}",
+					$"mov dword ptr [ebp], 0x{BaseAddress.ToInt32() + 24:X8}",
+					$"mov dword ptr [esp], 0x{BaseAddress.ToInt32() + 28:X8}",
+					*/
+
+					$"mov eax, [0x{BaseAddress.ToInt32():X8}]",
+					$"mov ebx, [0x{BaseAddress.ToInt32() + 4:X8}]",
+					$"mov ecx, [0x{BaseAddress.ToInt32() + 8:X8}]",
+					$"mov edx, [0x{BaseAddress.ToInt32() + 12:X8}]",
+					$"mov edi, [0x{BaseAddress.ToInt32() + 16:X8}]",
+					$"mov esi, [0x{BaseAddress.ToInt32() + 20:X8}]",
+					$"mov ebp, [0x{BaseAddress.ToInt32() + 24:X8}]",
+					$"mov esp, [0x{BaseAddress.ToInt32() + 28:X8}]",
+				}, true, out byte[] assembled);
+					// Generate mnemonics here
+
+					if (assembleResult)
+					{
+						PopAdBytes = assembled;
+						return PopAdBytes;
+					}
+
+					throw new InvalidOperationException();
+				}
+
+				// pushfd
+				public byte[] GeneratePushFd(bool force = false)
+				{
+					if (PushFdBytes != null && PushFdBytes.Length > 0 && !force)
+						return PushFdBytes;
+
+					bool assembleResult = Assembler.AssembleMnemonics(new[]
+					{
+					"pushfd",
+					$"pop [0x{BaseAddress.ToInt32() + 32:X8}]"
+				}, true, out byte[] assembled);
+
+					if (assembleResult)
+					{
+						PushFdBytes = assembled;
+						return PushFdBytes;
+					}
+
+					throw new InvalidOperationException();
+				}
+
+				// popfd
+				public byte[] GeneratePopFd(bool force = false)
+				{
+					if (PopFdBytes != null && PopFdBytes.Length > 0 && !force)
+						return PopFdBytes;
+
+					bool assembleResult = Assembler.AssembleMnemonics(new[]
+					{
+					$"push [0x{BaseAddress.ToInt32() + 32:X8}]",
+					$"popfd"
+				}, true, out byte[] assembled);
+
+					if (assembleResult)
+					{
+						PopFdBytes = assembled;
+						return PopFdBytes;
+					}
+
+					throw new InvalidOperationException();
+				}
+			}
+
+
 			public class HookObj<T> : IDisposable where T : Delegate
 			{
 				private bool _disposed;
@@ -622,6 +897,11 @@ namespace TestInject
 				{
 					if (responseString.Contains("Error:")) {
 						// Parse out error code
+						string errorText = responseString.Substring(
+							responseString.IndexOf("Error: "),
+							responseString.IndexOf("</div>"));
+
+						throw new Exception(errorText);
 					}
 					assembled = null;
 					return false;
@@ -631,6 +911,41 @@ namespace TestInject
 
 		public class Allocator
 		{
+			public class SmartAllocation
+			{
+				public readonly IntPtr Base;
+
+				public uint BytesLeft;
+				public IntPtr UnallocatedPositionStart;
+
+				public List<(IntPtr InnerAllocationBase, string Identifier)> Allocations;
+
+				public SmartAllocation()
+				{
+					Base = Unmanaged.Allocate(0x10000);
+					if (Base == IntPtr.Zero)
+						throw new Exception();
+
+					UnallocatedPositionStart = Base;
+					BytesLeft = 0x10000;
+					Allocations = new List<(IntPtr InnerAllocationBase, string Identifier)>();
+				}
+
+				public IntPtr Allocate(uint numBytes, string identifier)
+				{
+					if (numBytes == 0 || numBytes > BytesLeft || BytesLeft < 1)
+						throw new Exception($"Cannot allocate");
+
+					IntPtr start = UnallocatedPositionStart;
+
+					UnallocatedPositionStart = IntPtr.Add(UnallocatedPositionStart, (int)numBytes);
+					BytesLeft -= numBytes;
+
+					Allocations.Add((start, identifier));
+					return start;
+				}
+ 			}
+
 			public class Managed
 			{
 				public static IntPtr ManagedAllocate(int size)
@@ -740,14 +1055,16 @@ namespace TestInject
 			[StructLayout(LayoutKind.Sequential)]
 			public unsafe struct Registers
 			{
-				public readonly int EAX; // 0
-				public readonly int EBX; // 4
-				public readonly int ECX; // 8
-				public readonly int EDX; // 12
-				public readonly int EDI; // 16
-				public readonly int ESI; // 20
-				public readonly int EBP; // 24
-				public readonly int ESP; // 28
+				public int EAX; // 0
+				public int EBX; // 4
+				public int ECX; // 8
+				public int EDX; // 12
+				public int EDI; // 16
+				public int ESI; // 20
+				public int EBP; // 24
+				public int ESP; // 28
+
+				public int EFLAGS; // 32
 			}
 
 			[StructLayout(LayoutKind.Sequential)]
@@ -1505,6 +1822,26 @@ namespace TestInject
 			return ret;
 		}
 
+		public static string ByteArrayToHexString(this byte[] obj, bool CEStyleString = true)
+		{
+			string repres = "";
+			if (CEStyleString)
+			{
+				foreach (var bt in obj)
+				{
+					repres += $"{bt:X2} ";
+				}
+				return repres.TrimEnd(' ');
+			}
+			else
+			{
+				foreach (var bt in obj)
+				{
+					repres += $"\\x{bt:X2}";
+				}
+				return repres;
+			}
+		}
 	}
 
 	public static class GraphicsExtensions

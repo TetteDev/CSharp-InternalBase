@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using static TestInject.CSGO.Structures;
 using static TestInject.Memory.Structures;
+using static TestInject.CSGO.Enums;
 
 namespace TestInject
 {
@@ -40,7 +41,7 @@ namespace TestInject
 			public static unsafe uint* GetDevicePointer()
 				=> (uint*)(Memory.Pattern.FindPatternExecutable("shaderapidx9.dll", "B9 ?? ?? ?? ?? E8 E5 BD FF FF A1 ?? ?? ?? ??") + 1);
 
-			public static unsafe uint* DX9GetVTablePointerAtIndex(int index = 42 /* EndScene */)
+			public static unsafe uint* DX9GetVTablePointerAtIndex(DXFunctionIndexes index = DXFunctionIndexes.EndScene_Index)
 			{
 				List<long> result = Memory.Pattern.FindPattern(
 					"56 8B F1 E8 ?? ?? ?? ?? 33 C0 C7 06 ?? ?? ?? ?? 89 86 ?? ?? 00 00",
@@ -52,7 +53,7 @@ namespace TestInject
 					if (VTable == 0)
 						return null;
 
-					uint* pVTableItem = (uint*) (VTable + (index * sizeof(IntPtr)));
+					uint* pVTableItem = (uint*) (VTable + ((int)index * sizeof(IntPtr)));
 					return pVTableItem;
 				}
 
@@ -65,7 +66,10 @@ namespace TestInject
 			[UnmanagedFunctionPointer(CallingConvention.StdCall,
 				CharSet = CharSet.Unicode, 
 				SetLastError = true)]
-			public delegate void EndSceneDelegate(IntPtr pDevice);
+			public delegate int EndSceneDelegate(IntPtr pDevice);
+
+			[UnmanagedFunctionPointer(CallingConvention.Winapi)]
+			public delegate int DrawIndexedPrimitiveDelegate(D3DPRIMITIVETYPE type, int BaseVertexIndex, uint MinVertexIndex, uint NumVerticies, uint startIndex, uint primCount);
 		}
 
 
@@ -216,6 +220,141 @@ namespace TestInject
 			{
 				MENU = 0,
 				GAME = 6
+			}
+
+			public enum D3DPRIMITIVETYPE
+			{
+				D3DPT_POINTLIST = 1,
+				D3DPT_LINELIST = 2,
+				D3DPT_LINESTRIP = 3,
+				D3DPT_TRIANGLELIST = 4,
+				D3DPT_TRIANGLESTRIP = 5,
+				D3DPT_TRIANGLEFAN = 6,
+				D3DPT_FORCE_DWORD = 0x7fffffff
+			}
+
+			public enum DXFunctionIndexes : int
+			{
+				 Queryinterface_Index = 0,
+				 AddRef_Index = 1,
+				 Release_Index = 2,
+				 TestCooperativeLevel_Index = 3,
+				 GetAvailableTextureMem_Index = 4,
+				 EvictManagedResources_Index = 5,
+				 GetDirect3D_Index = 6,
+				 GetDeviceCaps_Index = 7,
+				 GetDisplayMode_Index = 8,
+				 GetCreationParameters_Index = 9,
+				 SetCursorProperties_Index = 10,
+				 SetCursorPosition_Index = 11,
+				 ShowCursor_Index = 12,
+				 CreateAdditionalSwapChain_Index = 13,
+				 GetSwapChain_Index = 14,
+				 GetNumberOfSwapChains_Index = 15,
+				 Reset_Index = 16,
+				 Present_Index = 17,
+				 GetBackBuffer_Index = 18,
+				 GetRasterStatus_Index = 19,
+				 SetDialogBoxMode_Index = 20,
+				 SetGammaRamp_Index = 21,
+				 GetGammaRamp_Index = 22,
+				 CreateTexture_Index = 23,
+				 CreateVolumeTexture_Index = 24,
+				 CreateCubeTexture_Index = 25,
+				 CreateVertexBuffer_Index = 26,
+				 CreateIndexBuffer_Index = 27,
+				 CreateRenderTarget_Index = 28,
+				 CreateDepthStencilSurface_Index = 29,
+				 UpdateSurface_Index = 30,
+				 UpdateTexture_Index = 31,
+				 GetRenderTargetData_Index = 32,
+				 GetFrontBufferData_Index = 33,
+				 StretchRect_Index = 34,
+				 ColorFill_Index = 35,
+				 CreateOffscreenPlainSurface_Index = 36,
+				 SetRenderTarget_Index = 37,
+				 GetRenderTarget_Index = 38,
+				 SetDepthStencilSurface_Index = 39,
+				 GetDepthStencilSurface_Index = 40,
+				 BeginScene_Index = 41,
+				 EndScene_Index = 42,
+				 Clear_Index = 43,
+				 SetTransform_Index = 44,
+				 GetTransform_Index = 45,
+				 MultiplyTransform_Index = 46,
+				 SetViewport_Index = 47,
+				 GetViewport_Index = 48,
+				 SetMaterial_Index = 49,
+				 GetMaterial_Index = 50,
+				 SetLight_Index = 51,
+				 GetLight_Index = 52,
+				 LightEnable_Index = 53,
+				 GetLightEnable_Index = 54,
+				 SetClipPlane_Index = 55,
+				 GetClipPlane_Index = 56,
+				 SetRenderState_Index = 57,
+				 GetRenderState_Index = 58,
+				 CreateStateBlock_Index = 59,
+				 BeginStateBlock_Index = 60,
+				 EndStateBlock_Index = 61,
+				 SetClipStatus_Index = 62,
+				 GetClipStatus_Index = 63,
+				 GetTexture_Index = 64,
+				 SetTexture_Index = 65,
+				 GetTextureStageState_Index = 66,
+				 SetTextureStageState_Index = 67,
+				 GetSamplerState_Index = 68,
+				 SetSamplerState_Index = 69,
+				 ValidateDevice_Index = 70,
+				 SetPaletteEntries_Index = 71,
+				 GetPaletteEntries_Index = 72,
+				 SetCurrentTexturePalette_Index = 73,
+				 GetCurrentTexturePalette_Index = 74,
+				 SetScissorRect_Index = 75,
+				 GetScissorRect_Index = 76,
+				 SetSoftwareVertexProcessing_Index = 77,
+				 GetSoftwareVertexProcessing_Index = 78,
+				 SetNPatchMode_Index = 79,
+				 GetNPatchMode_Index = 80,
+				 DrawPrimitive_Index = 81,
+				 DrawIndexedPrimitive_Index = 82,
+				 DrawPrimitiveUP_Index = 83,
+				 DrawIndexedPrimitiveUP_Index = 84,
+				 ProcessVertices_Index = 85,
+				 CreateVertexDeclaration_Index = 86,
+				 SetVertexDeclaration_Index = 87,
+				 GetVertexDeclaration_Index = 88,
+				 SetFVF_Index = 89,
+				 GetFVF_Index = 90,
+				 CreateVertexShader_Index = 91,
+				 SetVertexShader_Index = 92,
+				 GetVertexShader_Index = 93,
+				 SetVertexShaderConstantF_Index = 94,
+				 GetVertexShaderConstantF_Index = 95,
+				 SetVertexShaderConstantI_Index = 96,
+				 GetVertexShaderConstantI_Index = 97,
+				 SetVertexShaderConstantB_Index = 98,
+				 GetVertexShaderConstantB_Index = 99,
+				 SetStreamSource_Index = 100,
+				 GetStreamSource_Index = 101,
+				 SetStreamSourceFreq_Index = 102,
+				 GetStreamSourceFreq_Index = 103,
+				 SetIndices_Index = 104,
+				 GetIndices_Index = 105,
+				 CreatePixelShader_Index = 106,
+				 SetPixelShader_Index = 107,
+				 GetPixelShader_Index = 108,
+				 SetPixelShaderConstantF_Index = 109,
+				 GetPixelShaderConstantF_Index = 110,
+				 SetPixelShaderConstantI_Index = 111,
+				 GetPixelShaderConstantI_Index = 112,
+				 SetPixelShaderConstantB_Index = 113,
+				 GetPixelShaderConstantB_Index = 114,
+				 DrawRectPatch_Index = 115,
+				 DrawTriPatch_Index = 116,
+				 DeletePatch_Index = 117,
+				 CreateQuery_Index = 118,
+				 NumberOfFunctions = 118,
 			}
 		}
 

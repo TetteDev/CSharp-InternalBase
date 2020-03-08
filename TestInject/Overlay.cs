@@ -188,22 +188,7 @@ namespace TestInject
 				GetWindowLong(Handle, -20) | 0x80000 | 0x20);
 
 			CSGO.Modules.UpdateModules();
-
-			var ptrEndSceneFunc = Methods.DX9GetVTablePointerAtIndex(42);
-
-			if (ptrEndSceneFunc != null)
-			{
-
-				/*
-				endSceneHook = new HookObj<Delegates.EndSceneDelegate>(new IntPtr(*ptrEndSceneFunc),
-					EndScene_hk, 7, true);
-					*/
-
-				Console.WriteLine($"EndScene hook {(endSceneHook.IsImplemented ? "implemented successfully!" : " failed to implement ...")}");
-			}
 		}
-
-		
 
 		public static void RepositionLoop(Overlay formInstance)
 		{
