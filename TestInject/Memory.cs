@@ -13,12 +13,14 @@ using System.Net.Cache;
 using System.Reflection;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using System.Runtime.Remoting.Messaging;
 using System.Security;
 using System.Text;
 using System.Threading.Tasks;
 using TestInject;
 using Iced.Intel;
 using static Iced.Intel.AssemblerRegisters;
+using static TestInject.HelperMethods;
 
 namespace TestInject
 {
@@ -427,6 +429,122 @@ namespace TestInject
 				}
 			}
 
+			public unsafe class Callback
+			{
+				public readonly IntPtr InstallLocation;
+				public bool IsInstalled { get; private set; }
+
+				private readonly int _count;
+				private byte[] _orig;
+				private readonly IntPtr _func;
+				private readonly GCHandle _funcGC;
+				private readonly RegisterStates _registerstates;
+
+				public Callback(IntPtr location, Delegate callback, int numBytesOverwrite = 5)
+				{
+					if (location == IntPtr.Zero)
+						throw new InvalidOperationException("");
+
+					if (numBytesOverwrite < 5)
+						throw new InvalidOperationException("");
+
+
+					InstallLocation = location;
+					_count = numBytesOverwrite;
+					_func = Marshal.GetFunctionPointerForDelegate(callback);
+					_funcGC = GCHandle.Alloc(_func);
+
+					_registerstates = new RegisterStates();
+					_registerstates.GeneratePushAd();
+					_registerstates.GeneratePopAd();
+					_registerstates.GeneratePushFd();
+					_registerstates.GeneratePopFd();
+				}
+
+				public void Install()
+				{
+					if (IsInstalled)
+						return;
+
+					if (_orig == null)
+						_orig = Reader.ReadBytes(InstallLocation, (uint) _count);
+
+					/*
+					IntPtr region = Allocator.Unmanaged.Extended.AllocateHeap((uint) b.Length
+					                                                          + (uint) _registerstates.PushAdBytes.Length
+					                                                          + (uint) _registerstates.PopAdBytes.Length
+					                                                          //+ (uint) _registerstates.PushFdBytes.Length
+					                                                          //+ (uint) _registerstates.PopFdBytes.Length
+					                                                          + 5);
+					*/
+
+					IntPtr region = Allocator.Unmanaged.Allocate((uint) _registerstates.PushAdBytes.Length
+					                                             + (uint)_registerstates.PushFdBytes.Length
+																 + (uint) _registerstates.PopAdBytes.Length
+					                                             + (uint)_registerstates.PopFdBytes.Length
+																 + 5);
+					if (region == null) throw new InvalidOperationException();
+
+					Writer.WriteBytes(region, _orig);
+					uint start = (uint) region + (uint) _orig.Length;
+
+					Writer.WriteBytes((IntPtr) start, _registerstates.PushFdBytes);
+					start += (uint) _registerstates.PushFdBytes.Length;
+
+					Writer.WriteBytes((IntPtr) start, _registerstates.PushAdBytes);
+					start += (uint) _registerstates.PushAdBytes.Length;
+
+					Assembler.AssembleMnemonics(new []
+					{
+						// Pushing our register address as our first param to
+						// our callback method
+						$"push 0x{(_registerstates.BaseAddress).ToInt32():X8}",
+					}, true, out byte[] push);
+
+					Writer.WriteBytes((IntPtr)start, push);
+					start += (uint) push.Length;
+
+					*(byte*) start = 0xE8;
+					*(uint*) (start + 1) = CalculateRelativeAddressForJmp(start, (uint) _func); // call to callback
+					start += 5;
+
+					Writer.WriteBytes((IntPtr)start, new byte[] { 0x58 }); // pop eax
+					start += 1;
+
+					Writer.WriteBytes((IntPtr)start, _registerstates.PopFdBytes);
+					start += (uint)_registerstates.PopFdBytes.Length;
+
+					Writer.WriteBytes((IntPtr)start, _registerstates.PopAdBytes);
+					start += (uint) _registerstates.PopAdBytes.Length;
+
+					*(byte*)start = 0xE9;
+					*(uint*) (start + 1) = CalculateRelativeAddressForJmp(start, (uint)InstallLocation + (uint)_count);
+
+					if (!Protection.SetPageProtection(InstallLocation, _count, Enums.MemoryProtection.ExecuteReadWrite, out var old))
+					{
+						Allocator.Unmanaged.FreeMemory(region);
+						return;
+					}
+
+					*(byte*)InstallLocation = 0xE9;
+					*(uint*)(InstallLocation + 1) = CalculateRelativeAddressForJmp((uint)InstallLocation, (uint)region);
+
+					for (int n = 0; n < _count - 5; n++)
+						*(byte*)(InstallLocation + 5 + n) = 0x90;
+					Protection.SetPageProtection(InstallLocation, _count, old, out _);
+					IsInstalled = true;
+				}
+
+				public void Uninstall()
+				{
+					if (!IsInstalled)
+						return;
+
+					Protection.SetPageProtection(InstallLocation, _count, Enums.MemoryProtection.ExecuteReadWrite, out var old);
+					Writer.WriteBytes(InstallLocation, _orig);
+					Protection.SetPageProtection(InstallLocation, _count, old, out _);
+				}
+			}
 
 			public class HookObj<T> : IDisposable where T : Delegate
 			{
@@ -961,6 +1079,30 @@ namespace TestInject
 
 				public static bool FreeMemory(IntPtr address, uint optionalSize = 0)
 					=> PInvoke.VirtualFree(address, optionalSize, Enums.FreeType.Release);
+
+				public class Extended
+				{
+					private static IntPtr _heapObject;
+
+					public static IntPtr AllocateHeap(uint size, uint dwFlags = 0x00000004 | 0x00000008)
+					{
+						if (_heapObject == IntPtr.Zero)
+						{
+							_heapObject = PInvoke.HeapCreate(0x00040000 | 0x00000004, new UIntPtr(0),
+								new UIntPtr(0));
+
+							if (_heapObject == IntPtr.Zero) throw new Exception($"HeapCreate failed!");
+						}
+							
+
+						return size < 1 ? IntPtr.Zero : PInvoke.HeapAlloc(_heapObject, dwFlags, (UIntPtr) size);
+					}
+
+					public static bool FreeHeap(IntPtr addr, uint dwFlags = 0x00000004 | 0x00000008)
+					{
+						return _heapObject != IntPtr.Zero && PInvoke.HeapFree(_heapObject, dwFlags, addr);
+					}
+				}
 			}
 		}
 
@@ -1065,6 +1207,21 @@ namespace TestInject
 				public int ESP; // 28
 
 				public int EFLAGS; // 32
+
+				public string PrintRegisters()
+				{
+					string ret = "";
+					ret += $"\nEAX: 0x{EAX:X8}\n";
+					ret += $"EBX: 0x{EBX:X8}\n";
+					ret += $"ECX: 0x{ECX:X8}\n";
+					ret += $"EDX: 0x{EDX:X8}\n";
+					ret += $"EDI: 0x{EDI:X8}\n";
+					ret += $"ESI: 0x{ESI:X8}\n";
+					ret += $"EBP: 0x{EBP:X8}\n";
+					ret += $"ESP: 0x{ESP:X8}\n";
+					ret += $"EFLAGS: 0x{EFLAGS:X8}\n";
+					return ret;
+				}
 			}
 
 			[StructLayout(LayoutKind.Sequential)]
@@ -1618,6 +1775,16 @@ namespace TestInject
 
 			[DllImport("user32.dll", EntryPoint = "FindWindow", SetLastError = true)]
 			public static extern IntPtr FindWindowByCaption(IntPtr ZeroOnly, string lpWindowName);
+
+			[DllImport("kernel32.dll", SetLastError = false)]
+			public static extern IntPtr HeapAlloc(IntPtr hHeap, uint dwFlags, UIntPtr dwBytes);
+
+			[DllImport("kernel32.dll", SetLastError = true)]
+			public static extern IntPtr HeapCreate(uint flOptions, UIntPtr dwInitialSize,
+				UIntPtr dwMaximumSize);
+
+			[DllImport("kernel32.dll", SetLastError = true)]
+			public static extern bool HeapFree(IntPtr hHeap, uint dwFlags, IntPtr lpMem);
 		}
 	}
 
@@ -1668,6 +1835,17 @@ namespace TestInject
 
 	public class HelperMethods
 	{
+
+		public static unsafe T* malloc<T>(T obj) where T : unmanaged
+		{
+			var ptr = (T*)Memory.Allocator.Unmanaged.Extended.AllocateHeap((uint) Marshal.SizeOf<T>());
+			if (ptr == null)
+				throw new Exception("malloc failed");
+
+			*ptr = default;
+			return ptr;
+		} 
+
 		public static void PrintExceptionData(object exceptionObj, bool writeToFile = false)
 		{
 			if (exceptionObj == null) return;

@@ -11,10 +11,13 @@ namespace TestInject
 {
 	public class MyLibrary
 	{
-		public static Detours.Hook<GetPlayerInCrosshair> method1;
-
 		[UnmanagedFunctionPointer(CallingConvention.StdCall)]
 		public delegate int GetPlayerInCrosshair();
+
+		[UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+		public unsafe delegate int CallbackDelegate(IntPtr addrRegisterStruct);
+
+		public static Detours.Callback MyCallback;
 
 		[DllExport("DllMain", CallingConvention.Cdecl)]
 		public static unsafe void EntryPoint()
@@ -28,29 +31,47 @@ namespace TestInject
 					MessageBoxButtons.OK,
 					MessageBoxIcon.Error);
 
-			SetUpHooks();
+			//SetUpHooks();
 			//new Thread(() => new Overlay("Counter-Strike: Global Offensive").ShowDialog()).Start();
+
+			Console.WriteLine($"Installing code execution callback");
+			MyCallback = new Detours.Callback(new IntPtr(0x004637E9), 
+				new CallbackDelegate(MyCallbackMethod), 
+				7);
+			MyCallback.Install();
+			Console.WriteLine($"Done!");
+
 
 			Console.ReadLine();
 		}
-		 
-		public static int MyHook()
-		{
-			// You have access to modify the register values before it jumps back to the original
 
-			// Continue flow at original function with changes to the register values (if decided to change)
-			return method1.Original();
+		public static unsafe int MyCallbackMethod(IntPtr registerPtr)
+		{
+			if (registerPtr == IntPtr.Zero)
+			{
+				Console.WriteLine($"MyCallbackMethod - Failed");
+				return 0;
+			}
+
+			Structures.Registers* reg = (Structures.Registers*)registerPtr;
+			Console.WriteLine(reg->PrintRegisters());
+
+			if (reg->ESI != 0)
+			{
+				Console.WriteLine($"Current Ammo Pointer: 0x{reg->ESI:X8}");
+
+				Console.WriteLine("Setting our current ammo to a random number\n");
+				*(int*) reg->ESI = new Random().Next(1, 999);
+			}
+			
+			return 0;
 		}
+		 
+		
 
 		public static unsafe void SetUpHooks()
 		{
 			Console.WriteLine($"[{DateTime.Now.ToLongTimeString()}] Hooks::SetupHooks() started execution!\n");
-
-			// Setup hooks here
-			Console.WriteLine($"Attempting to hook GetPlayerInCrosshair");
-			method1 = new Detours.Hook<GetPlayerInCrosshair>(
-				new IntPtr(0x004607C0), new GetPlayerInCrosshair(MyHook), true, 6);
-			Console.WriteLine($"GetPlayerInCrosshair Hook {(method1.Install() ? "installed!" : "failed to install ...")}");
 
 			Console.WriteLine($"\n[{DateTime.Now.ToLongTimeString()}] Hooks::SetupHooks() finished execution!");
 		}
