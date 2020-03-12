@@ -18,8 +18,6 @@ using System.Security;
 using System.Text;
 using System.Threading.Tasks;
 using TestInject;
-using Iced.Intel;
-using static Iced.Intel.AssemblerRegisters;
 using static TestInject.HelperMethods;
 
 namespace TestInject
@@ -169,7 +167,7 @@ namespace TestInject
 
 				private byte[] originalBytes;
 				private bool compabilityModeEnabled;
-				public RegisterStates RegisterStates;
+				public Structures.RegisterStates RegisterStates;
 				private int numBytes;
 
 				private IntPtr middleman;
@@ -187,7 +185,7 @@ namespace TestInject
 					this.hook = hook ?? throw new InvalidOperationException($"Hook cannot be null");
 					hookHandle = GCHandle.Alloc(hook, GCHandleType.Normal);
 					compabilityModeEnabled = compabilityMode;
-					RegisterStates = compabilityModeEnabled ? new RegisterStates() : null;
+					RegisterStates = compabilityModeEnabled ? new Structures.RegisterStates() : null;
 
 					if (compabilityMode && RegisterStates != null)
 					{
@@ -293,143 +291,8 @@ namespace TestInject
 					return IsEnabled;
 				}
 			}
-			public unsafe class RegisterStates
-			{
-				// Manually saving values of all general purpose registers and EFLAGS
-				// Instead of using PushAD/PushFD (and PopAD & PopFD)
 
-				public IntPtr BaseAddress;
-
-				public byte[] PushAdBytes { get; private set; }
-				public byte[] PopAdBytes { get; private set; }
-				public byte[] PopFdBytes { get; private set; }
-				public byte[] PushFdBytes { get; private set; }
-
-				public Structures.Registers* RegisterStructPointer { get; private set; }
-
-				public RegisterStates()
-				{
-					BaseAddress = Allocator.Unmanaged.Allocate((uint)Marshal.SizeOf<Structures.Registers>(),
-						Enums.AllocationType.Commit | Enums.AllocationType.Reserve,
-						Enums.MemoryProtection.ReadWrite);
-					if (BaseAddress == IntPtr.Zero)
-						throw new InvalidOperationException();
-
-					RegisterStructPointer = (Structures.Registers*)BaseAddress;
-				}
-
-				// Pushad
-				public byte[] GeneratePushAd(bool force = false)
-				{
-					if (PushAdBytes != null && PushAdBytes.Length > 0 && !force)
-						return PushAdBytes;
-
-					// Generate mnemonics here
-
-					bool assembleResult = Assembler.AssembleMnemonics(new[]
-					{
-					$"mov dword ptr [0x{BaseAddress.ToInt32():X8}], eax",
-					$"mov dword ptr [0x{BaseAddress.ToInt32() + 4:X8}], ebx",
-					$"mov dword ptr [0x{BaseAddress.ToInt32() + 8:X8}], ecx",
-					$"mov dword ptr [0x{BaseAddress.ToInt32() + 12:X8}], edx",
-					$"mov dword ptr [0x{BaseAddress.ToInt32() + 16:X8}], edi",
-					$"mov dword ptr [0x{BaseAddress.ToInt32() + 20:X8}], esi",
-					$"mov dword ptr [0x{BaseAddress.ToInt32() + 24:X8}], ebp",
-					$"mov dword ptr [0x{BaseAddress.ToInt32() + 28:X8}], esp"
-				}, true, out byte[] assembled);
-
-					if (assembleResult)
-					{
-						PushAdBytes = assembled;
-						return PushAdBytes;
-					}
-
-					throw new InvalidOperationException();
-				}
-
-				// Popad
-				public byte[] GeneratePopAd(bool force = false)
-				{
-					if (PopAdBytes != null && PopAdBytes.Length > 0 && !force)
-						return PopAdBytes;
-
-					bool assembleResult = Assembler.AssembleMnemonics(new[]
-					{
-					/*
-					$"mov dword ptr [eax], 0x{BaseAddress.ToInt32():X8}",
-					$"mov dword ptr [ebx], 0x{BaseAddress.ToInt32() + 4:X8}",
-					$"mov dword ptr [ecx], 0x{BaseAddress.ToInt32() + 8:X8}",
-					$"mov dword ptr [edx], 0x{BaseAddress.ToInt32() + 12:X8}",
-					$"mov dword ptr [edi], 0x{BaseAddress.ToInt32() + 16:X8}",
-					$"mov dword ptr [esi], 0x{BaseAddress.ToInt32() + 20:X8}",
-					$"mov dword ptr [ebp], 0x{BaseAddress.ToInt32() + 24:X8}",
-					$"mov dword ptr [esp], 0x{BaseAddress.ToInt32() + 28:X8}",
-					*/
-
-					$"mov eax, [0x{BaseAddress.ToInt32():X8}]",
-					$"mov ebx, [0x{BaseAddress.ToInt32() + 4:X8}]",
-					$"mov ecx, [0x{BaseAddress.ToInt32() + 8:X8}]",
-					$"mov edx, [0x{BaseAddress.ToInt32() + 12:X8}]",
-					$"mov edi, [0x{BaseAddress.ToInt32() + 16:X8}]",
-					$"mov esi, [0x{BaseAddress.ToInt32() + 20:X8}]",
-					$"mov ebp, [0x{BaseAddress.ToInt32() + 24:X8}]",
-					$"mov esp, [0x{BaseAddress.ToInt32() + 28:X8}]",
-				}, true, out byte[] assembled);
-					// Generate mnemonics here
-
-					if (assembleResult)
-					{
-						PopAdBytes = assembled;
-						return PopAdBytes;
-					}
-
-					throw new InvalidOperationException();
-				}
-
-				// pushfd
-				public byte[] GeneratePushFd(bool force = false)
-				{
-					if (PushFdBytes != null && PushFdBytes.Length > 0 && !force)
-						return PushFdBytes;
-
-					bool assembleResult = Assembler.AssembleMnemonics(new[]
-					{
-					"pushfd",
-					$"pop [0x{BaseAddress.ToInt32() + 32:X8}]"
-				}, true, out byte[] assembled);
-
-					if (assembleResult)
-					{
-						PushFdBytes = assembled;
-						return PushFdBytes;
-					}
-
-					throw new InvalidOperationException();
-				}
-
-				// popfd
-				public byte[] GeneratePopFd(bool force = false)
-				{
-					if (PopFdBytes != null && PopFdBytes.Length > 0 && !force)
-						return PopFdBytes;
-
-					bool assembleResult = Assembler.AssembleMnemonics(new[]
-					{
-					$"push [0x{BaseAddress.ToInt32() + 32:X8}]",
-					$"popfd"
-				}, true, out byte[] assembled);
-
-					if (assembleResult)
-					{
-						PopFdBytes = assembled;
-						return PopFdBytes;
-					}
-
-					throw new InvalidOperationException();
-				}
-			}
-
-			public unsafe class Callback
+			public unsafe class CodeExecutionCallback
 			{
 				public readonly IntPtr InstallLocation;
 				public bool IsInstalled { get; private set; }
@@ -438,9 +301,9 @@ namespace TestInject
 				private byte[] _orig;
 				private readonly IntPtr _func;
 				private readonly GCHandle _funcGC;
-				private readonly RegisterStates _registerstates;
+				private readonly Structures.RegisterStates _registerstates;
 
-				public Callback(IntPtr location, Delegate callback, int numBytesOverwrite = 5)
+				public CodeExecutionCallback(IntPtr location, Delegate callback, int numBytesOverwrite = 5)
 				{
 					if (location == IntPtr.Zero)
 						throw new InvalidOperationException("");
@@ -454,20 +317,22 @@ namespace TestInject
 					_func = Marshal.GetFunctionPointerForDelegate(callback);
 					_funcGC = GCHandle.Alloc(_func);
 
-					_registerstates = new RegisterStates();
+					_registerstates = new Structures.RegisterStates();
 					_registerstates.GeneratePushAd();
 					_registerstates.GeneratePopAd();
 					_registerstates.GeneratePushFd();
 					_registerstates.GeneratePopFd();
 				}
 
-				public void Install()
+				public void Install(bool verbose = false)
 				{
 					if (IsInstalled)
 						return;
 
 					if (_orig == null)
 						_orig = Reader.ReadBytes(InstallLocation, (uint) _count);
+
+					if (verbose) Console.WriteLine($"Read {_orig.Length} bytes from 0x{InstallLocation.ToInt32():X8}");
 
 					/*
 					IntPtr region = Allocator.Unmanaged.Extended.AllocateHeap((uint) b.Length
@@ -482,17 +347,23 @@ namespace TestInject
 					                                             + (uint)_registerstates.PushFdBytes.Length
 																 + (uint) _registerstates.PopAdBytes.Length
 					                                             + (uint)_registerstates.PopFdBytes.Length
-																 + 5);
+																 + 5 /* jmp to original code */);
 					if (region == null) throw new InvalidOperationException();
+					if (verbose) Console.WriteLine($"Allocated a new region - 0x{region.ToInt32():X8}");
 
 					Writer.WriteBytes(region, _orig);
+					if (verbose) Console.WriteLine($"Wrote original bytes at address 0x{region.ToInt32():X8}");
 					uint start = (uint) region + (uint) _orig.Length;
 
-					Writer.WriteBytes((IntPtr) start, _registerstates.PushFdBytes);
-					start += (uint) _registerstates.PushFdBytes.Length;
 
+					Writer.WriteBytes((IntPtr) start, _registerstates.PushFdBytes);
+					if (verbose) Console.WriteLine($"Wrote PushFD bytes at address 0x{start:X8}");
+					start += (uint) _registerstates.PushFdBytes.Length;
+					
 					Writer.WriteBytes((IntPtr) start, _registerstates.PushAdBytes);
+					if (verbose) Console.WriteLine($"Wrote PushAd bytes at address 0x{start:X8}");
 					start += (uint) _registerstates.PushAdBytes.Length;
+					
 
 					Assembler.AssembleMnemonics(new []
 					{
@@ -502,36 +373,45 @@ namespace TestInject
 					}, true, out byte[] push);
 
 					Writer.WriteBytes((IntPtr)start, push);
+					if (verbose) Console.WriteLine($"Wrote parameter push to callback at address 0x{start:X8}");
 					start += (uint) push.Length;
-
+					
 					*(byte*) start = 0xE8;
 					*(uint*) (start + 1) = CalculateRelativeAddressForJmp(start, (uint) _func); // call to callback
+					if (verbose) Console.WriteLine($"Wrote call to C# callback at address 0x{start:X8}");
 					start += 5;
 
-					Writer.WriteBytes((IntPtr)start, new byte[] { 0x58 }); // pop eax
-					start += 1;
-
 					Writer.WriteBytes((IntPtr)start, _registerstates.PopFdBytes);
+					if (verbose) Console.WriteLine($"Wrote PopFD bytes at address 0x{start:X8}");
 					start += (uint)_registerstates.PopFdBytes.Length;
 
 					Writer.WriteBytes((IntPtr)start, _registerstates.PopAdBytes);
+					if (verbose) Console.WriteLine($"Wrote PopAD bytes at address 0x{start:X8}");
 					start += (uint) _registerstates.PopAdBytes.Length;
 
 					*(byte*)start = 0xE9;
 					*(uint*) (start + 1) = CalculateRelativeAddressForJmp(start, (uint)InstallLocation + (uint)_count);
+					if (verbose) Console.WriteLine($"Wrote jmp from middleman region to start at address 0x{InstallLocation.ToInt32():X8}");
 
 					if (!Protection.SetPageProtection(InstallLocation, _count, Enums.MemoryProtection.ExecuteReadWrite, out var old))
 					{
 						Allocator.Unmanaged.FreeMemory(region);
+						if (verbose) Console.WriteLine($"Failed changing Page Protection of address 0x{InstallLocation.ToInt32():X8} to EXECUTE_READ_WRITE, returning...");
 						return;
 					}
+
+					if (verbose) Console.WriteLine($"Changed PageProtection of address 0x{InstallLocation.ToInt32():X8} to {Enums.MemoryProtection.ExecuteReadWrite.ToString()}");
 
 					*(byte*)InstallLocation = 0xE9;
 					*(uint*)(InstallLocation + 1) = CalculateRelativeAddressForJmp((uint)InstallLocation, (uint)region);
 
 					for (int n = 0; n < _count - 5; n++)
 						*(byte*)(InstallLocation + 5 + n) = 0x90;
+					if (verbose) Console.WriteLine($"Wrote {_count - 5} NOPs to address 0x{(InstallLocation + 5).ToInt32():X8}");
+
 					Protection.SetPageProtection(InstallLocation, _count, old, out _);
+					if (verbose) Console.WriteLine($"Restored Page Protection at adress 0x{InstallLocation.ToInt32():X8} to {old.ToString()}");
+
 					IsInstalled = true;
 				}
 
@@ -1194,6 +1074,168 @@ namespace TestInject
 
 		public class Structures
 		{
+			public unsafe class RegisterStates
+			{
+				// Manually saving values of all general purpose registers and EFLAGS
+				// Instead of using PushAD/PushFD (and PopAD & PopFD)
+
+				public IntPtr BaseAddress;
+
+				public byte[] PushAdBytes { get; private set; }
+				public byte[] PopAdBytes { get; private set; }
+				public byte[] PopFdBytes { get; private set; }
+				public byte[] PushFdBytes { get; private set; }
+
+				public Structures.Registers* RegisterStructPointer { get; private set; }
+
+				public RegisterStates()
+				{
+					BaseAddress = Allocator.Unmanaged.Allocate((uint)Marshal.SizeOf<Structures.Registers>(),
+						Enums.AllocationType.Commit | Enums.AllocationType.Reserve,
+						Enums.MemoryProtection.ReadWrite);
+					if (BaseAddress == IntPtr.Zero)
+						throw new InvalidOperationException();
+
+					RegisterStructPointer = (Structures.Registers*)BaseAddress;
+				}
+
+				// Pushad
+				public byte[] GeneratePushAd(bool force = false)
+				{
+					if (PushAdBytes != null && PushAdBytes.Length > 0 && !force)
+						return PushAdBytes;
+
+					// Generate mnemonics here
+
+					bool assembleResult = Assembler.AssembleMnemonics(new[]
+					{
+						$"mov dword ptr [0x{BaseAddress.ToInt32():X8}], eax",
+						$"mov dword ptr [0x{BaseAddress.ToInt32() + 4:X8}], ebx",
+						$"mov dword ptr [0x{BaseAddress.ToInt32() + 8:X8}], ecx",
+						$"mov dword ptr [0x{BaseAddress.ToInt32() + 12:X8}], edx",
+						$"mov dword ptr [0x{BaseAddress.ToInt32() + 16:X8}], edi",
+						$"mov dword ptr [0x{BaseAddress.ToInt32() + 20:X8}], esi",
+						$"mov dword ptr [0x{BaseAddress.ToInt32() + 24:X8}], ebp",
+						$"mov dword ptr [0x{BaseAddress.ToInt32() + 28:X8}], esp",
+
+						$"mov word ptr [0x{BaseAddress.ToInt32() + 36:X8}], ax",
+						$"mov word ptr [0x{BaseAddress.ToInt32() + 38:X8}], bx",
+						$"mov word ptr [0x{BaseAddress.ToInt32() + 40:X8}], cx",
+						$"mov word ptr [0x{BaseAddress.ToInt32() + 42:X8}], dx",
+
+						$"mov byte ptr [0x{BaseAddress.ToInt32() + 44:X8}], ah",
+						$"mov byte ptr [0x{BaseAddress.ToInt32() + 45:X8}], al",
+
+						$"mov byte ptr [0x{BaseAddress.ToInt32() + 46:X8}], bh",
+						$"mov byte ptr [0x{BaseAddress.ToInt32() + 47:X8}], bl",
+
+						$"mov byte ptr [0x{BaseAddress.ToInt32() + 48:X8}], ch",
+						$"mov byte ptr [0x{BaseAddress.ToInt32() + 49:X8}], cl",
+
+						$"mov byte ptr [0x{BaseAddress.ToInt32() + 50:X8}], dh",
+						$"mov byte ptr [0x{BaseAddress.ToInt32() + 51:X8}], dl",
+
+						"push [esp]",
+						$"pop dword ptr [0x{BaseAddress.ToInt32() + 52:X8}]"
+					}, true, out byte[] assembled);
+
+					if (assembleResult)
+					{
+						PushAdBytes = assembled;
+						return PushAdBytes;
+					}
+
+					throw new InvalidOperationException();
+				}
+
+				// Popad
+				public byte[] GeneratePopAd(bool force = false)
+				{
+					if (PopAdBytes != null && PopAdBytes.Length > 0 && !force)
+						return PopAdBytes;
+
+					bool assembleResult = Assembler.AssembleMnemonics(new[]
+					{
+						$"mov eax, [0x{BaseAddress.ToInt32():X8}]",
+						$"mov ebx, [0x{BaseAddress.ToInt32() + 4:X8}]",
+						$"mov ecx, [0x{BaseAddress.ToInt32() + 8:X8}]",
+						$"mov edx, [0x{BaseAddress.ToInt32() + 12:X8}]",
+						$"mov edi, [0x{BaseAddress.ToInt32() + 16:X8}]",
+						$"mov esi, [0x{BaseAddress.ToInt32() + 20:X8}]",
+						$"mov ebp, [0x{BaseAddress.ToInt32() + 24:X8}]",
+						$"mov esp, [0x{BaseAddress.ToInt32() + 28:X8}]",
+
+						$"mov ax, [0x{BaseAddress.ToInt32() + 36:X8}]",
+						$"mov bx, [0x{BaseAddress.ToInt32() + 38:X8}]",
+						$"mov cx, [0x{BaseAddress.ToInt32() + 40:X8}]",
+						$"mov dx, [0x{BaseAddress.ToInt32() + 42:X8}]",
+
+						$"mov ah, [0x{BaseAddress.ToInt32() + 44:X8}]",
+						$"mov al, [0x{BaseAddress.ToInt32() + 45:X8}]",
+
+						$"mov bh, [0x{BaseAddress.ToInt32() + 46:X8}]",
+						$"mov bl, [0x{BaseAddress.ToInt32() + 47:X8}]",
+
+						$"mov ch, [0x{BaseAddress.ToInt32() + 48:X8}]",
+						$"mov cl, [0x{BaseAddress.ToInt32() + 49:X8}]",
+
+						$"mov dh, [0x{BaseAddress.ToInt32() + 50:X8}]",
+						$"mov dl, [0x{BaseAddress.ToInt32() + 51:X8}]",
+				}, true, out byte[] assembled);
+					// Generate mnemonics here
+
+					if (assembleResult)
+					{
+						PopAdBytes = assembled;
+						return PopAdBytes;
+					}
+
+					throw new InvalidOperationException();
+				}
+
+				// pushfd
+				public byte[] GeneratePushFd(bool force = false)
+				{
+					if (PushFdBytes != null && PushFdBytes.Length > 0 && !force)
+						return PushFdBytes;
+
+					bool assembleResult = Assembler.AssembleMnemonics(new[]
+					{
+						"pushfd",
+						$"pop [0x{BaseAddress.ToInt32() + 32:X8}]"
+					}, true, out byte[] assembled);
+
+					if (assembleResult)
+					{
+						PushFdBytes = assembled;
+						return PushFdBytes;
+					}
+
+					throw new InvalidOperationException();
+				}
+
+				// popfd
+				public byte[] GeneratePopFd(bool force = false)
+				{
+					if (PopFdBytes != null && PopFdBytes.Length > 0 && !force)
+						return PopFdBytes;
+
+					bool assembleResult = Assembler.AssembleMnemonics(new[]
+					{
+						$"push [0x{BaseAddress.ToInt32() + 32:X8}]",
+						$"popfd"
+					}, true, out byte[] assembled);
+
+					if (assembleResult)
+					{
+						PopFdBytes = assembled;
+						return PopFdBytes;
+					}
+
+					throw new InvalidOperationException();
+				}
+			}
+
 			[StructLayout(LayoutKind.Sequential)]
 			public unsafe struct Registers
 			{
@@ -1208,18 +1250,54 @@ namespace TestInject
 
 				public int EFLAGS; // 32
 
+				public short AX; // 36
+				public short BX; // 38
+				public short CX; // 40
+				public short DX; // 42
+
+				public byte AH; // 44;
+				public byte AL; // 45
+				public byte BH; // 46
+				public byte BL; // 47
+				public byte CH; // 48
+				public byte CL; // 49
+				public byte DH; // 50
+				public byte DL; // 51
+
+				public readonly int EIP; // 52
+
 				public string PrintRegisters()
 				{
 					string ret = "";
-					ret += $"\nEAX: 0x{EAX:X8}\n";
-					ret += $"EBX: 0x{EBX:X8}\n";
-					ret += $"ECX: 0x{ECX:X8}\n";
-					ret += $"EDX: 0x{EDX:X8}\n";
-					ret += $"EDI: 0x{EDI:X8}\n";
-					ret += $"ESI: 0x{ESI:X8}\n";
-					ret += $"EBP: 0x{EBP:X8}\n";
-					ret += $"ESP: 0x{ESP:X8}\n";
-					ret += $"EFLAGS: 0x{EFLAGS:X8}\n";
+
+					ret += $"\nEIP: 0x{EIP:X8} ({EIP})\n";
+					ret += $"EFLAGS: 0x{EFLAGS:X8} ({EFLAGS})\n";
+
+					ret += $"EAX: 0x{EAX:X8} ({EAX})\n";
+					ret += $"EBX: 0x{EBX:X8} ({EBX})\n";
+					ret += $"ECX: 0x{ECX:X8} ({ECX})\n";
+					ret += $"EDX: 0x{EDX:X8} ({EDX})\n";
+					ret += $"EDI: 0x{EDI:X8} ({EDI})\n";
+					ret += $"ESI: 0x{ESI:X8} ({ESI})\n";
+					ret += $"EBP: 0x{EBP:X8} ({EBP})\n";
+					ret += $"ESP: 0x{ESP:X8} ({ESP})\n";
+
+					ret += $"AX: 0x{AX:X} ({AX})\n";
+					ret += $"BX: 0x{BX:X} ({BX})\n";
+					ret += $"CX: 0x{CX:X} ({CX})\n";
+					ret += $"DX: 0x{DX:X} ({DX})\n";
+
+					ret += $"AH: 0x{AH:X} ({AH})\n";
+					ret += $"AL: 0x{AL:X} ({AL})\n";
+
+					ret += $"BH: 0x{BH:X} ({BH})\n";
+					ret += $"BL: 0x{BL:X} ({BL})\n";
+
+					ret += $"CH: 0x{CH:X} ({CH})\n";
+					ret += $"CL: 0x{CL:X} ({CL})\n";
+
+					ret += $"DH: 0x{DH:X} ({DH})\n";
+					ret += $"DL: 0x{DL:X} ({DL})\n";
 					return ret;
 				}
 			}

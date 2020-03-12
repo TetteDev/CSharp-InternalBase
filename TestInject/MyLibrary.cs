@@ -15,9 +15,9 @@ namespace TestInject
 		public delegate int GetPlayerInCrosshair();
 
 		[UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-		public unsafe delegate int CallbackDelegate(IntPtr addrRegisterStruct);
+		public unsafe delegate void CallbackDelegate(IntPtr addrRegisterStruct);
 
-		public static Detours.Callback MyCallback;
+		public static Detours.CodeExecutionCallback MyCallback;
 
 		[DllExport("DllMain", CallingConvention.Cdecl)]
 		public static unsafe void EntryPoint()
@@ -34,41 +34,37 @@ namespace TestInject
 			//SetUpHooks();
 			//new Thread(() => new Overlay("Counter-Strike: Global Offensive").ShowDialog()).Start();
 
-			Console.WriteLine($"Installing code execution callback");
-			MyCallback = new Detours.Callback(new IntPtr(0x004637E9), 
+			Console.WriteLine("Installing code execution callback @ 0x004637E9");
+			MyCallback = new Detours.CodeExecutionCallback(new IntPtr(0x004637E9), 
 				new CallbackDelegate(MyCallbackMethod), 
 				7);
-			MyCallback.Install();
-			Console.WriteLine($"Done!");
-
+			MyCallback.Install(true);
+			Console.WriteLine("Done!");
 
 			Console.ReadLine();
 		}
 
-		public static unsafe int MyCallbackMethod(IntPtr registerPtr)
+		public static unsafe void MyCallbackMethod(IntPtr registerPtr)
 		{
 			if (registerPtr == IntPtr.Zero)
 			{
-				Console.WriteLine($"MyCallbackMethod - Failed");
-				return 0;
+				Console.WriteLine("MyCallbackMethod - Failed");
+				return;
 			}
 
 			Structures.Registers* reg = (Structures.Registers*)registerPtr;
 			Console.WriteLine(reg->PrintRegisters());
 
-			if (reg->ESI != 0)
+			// We know that the pointer in ESI points to the value of our current ammo
+			if ((int*) reg->ESI != null)
 			{
-				Console.WriteLine($"Current Ammo Pointer: 0x{reg->ESI:X8}");
-
-				Console.WriteLine("Setting our current ammo to a random number\n");
-				*(int*) reg->ESI = new Random().Next(1, 999);
+				*(int*)reg->ESI = new Random().Next(1, 1337);
+				Console.WriteLine($"Current Ammo: {*(int*)reg->ESI}");
 			}
-			
-			return 0;
-		}
-		 
-		
 
+			return;
+		}
+		
 		public static unsafe void SetUpHooks()
 		{
 			Console.WriteLine($"[{DateTime.Now.ToLongTimeString()}] Hooks::SetupHooks() started execution!\n");
