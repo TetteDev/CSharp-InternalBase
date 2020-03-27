@@ -13,11 +13,10 @@ using System.Net.Cache;
 using System.Reflection;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
-using System.Runtime.Remoting.Messaging;
 using System.Security;
 using System.Text;
+using System.Threading;
 using System.Threading.Tasks;
-using TestInject;
 using static TestInject.HelperMethods;
 
 namespace TestInject
@@ -105,6 +104,7 @@ namespace TestInject
 
 		public class Detours
 		{
+			[Obsolete("Use class BasicHook<T> instead of PrologueHook<T>")]
 			public unsafe class PrologueHook<T> : IDisposable where T : Delegate
 			{
 				public bool Enabled { get; private set; }
@@ -154,278 +154,7 @@ namespace TestInject
 				#endregion
 			}
 
-			public unsafe class Hook<T> where T : Delegate
-			{
-				public readonly IntPtr Target;
-				public bool IsEnabled;
-
-				public T Original;
-				private GCHandle origHandle;
-
-				private GCHandle hookHandle;
-				private Delegate hook;
-
-				private byte[] originalBytes;
-				private bool compabilityModeEnabled;
-				public Structures.RegisterStates RegisterStates;
-				private int numBytes;
-
-				private IntPtr middleman;
-				private IntPtr origFunc;
-
-
-				public Hook(IntPtr target, Delegate hook, bool compabilityMode = true, int prologueLengthFixup = 5)
-				{
-					if (prologueLengthFixup < 5)
-						throw new InvalidOperationException($"Need atleast 5 bytes");
-
-					if (target == IntPtr.Zero)
-						throw new InvalidOperationException($"Target cannot be null");
-
-					this.hook = hook ?? throw new InvalidOperationException($"Hook cannot be null");
-					hookHandle = GCHandle.Alloc(hook, GCHandleType.Normal);
-					compabilityModeEnabled = compabilityMode;
-					RegisterStates = compabilityModeEnabled ? new Structures.RegisterStates() : null;
-
-					if (compabilityMode && RegisterStates != null)
-					{
-						RegisterStates.GeneratePopFd(true);
-						RegisterStates.GeneratePushFd(true);
-
-						RegisterStates.GeneratePushAd(true);
-						RegisterStates.GeneratePopAd(true);
-					}
-
-					Target = target;
-					numBytes = prologueLengthFixup;
-					originalBytes = Reader.ReadBytes(Target, (uint)numBytes);
-
-					middleman = Allocator.Unmanaged.Allocate(5 + (uint)prologueLengthFixup + 
-					                                         (compabilityMode ? (uint)RegisterStates.PushAdBytes.Length + (uint)RegisterStates.PushFdBytes.Length : 0));
-					if (middleman == IntPtr.Zero)
-						throw new InvalidOperationException($"Failed to allocate memory for middleman");
-
-					origFunc = Allocator.Unmanaged.Allocate(5 + (uint) prologueLengthFixup + 
-					                                        (compabilityMode ? (uint) RegisterStates.PopAdBytes.Length + (uint)RegisterStates.PopFdBytes.Length : 0));
-					if (origFunc == IntPtr.Zero)
-					{
-						if (middleman != IntPtr.Zero)
-							Allocator.Unmanaged.FreeMemory(middleman);
-
-						throw new InvalidOperationException($"Failed allocating memory for orig func");
-					}
-
-					Original = Marshal.GetDelegateForFunctionPointer<T>(Target);
-					origHandle = GCHandle.Alloc(Original, GCHandleType.Normal);
-
-					Console.Title = $"Middleman: 0x{middleman.ToInt32():X8}, Orig Func: 0x{origFunc.ToInt32():X8}";
-					Console.WriteLine($"Middleman: 0x{middleman.ToInt32():X8}, Orig Func: 0x{origFunc.ToInt32():X8}");
-				}
-
-				public bool Install()
-				{
-					if (IsEnabled)
-						return false;
-
-					Protection.SetPageProtection(Target, numBytes, Enums.MemoryProtection.ExecuteReadWrite, out var oldProtection);
-
-					int offset = 0;
-					// Middleman to hook
-					if (compabilityModeEnabled)
-					{
-						Writer.WriteBytes(middleman, RegisterStates.PushAdBytes);
-						offset += RegisterStates.PushAdBytes.Length;
-
-						Writer.WriteBytes(middleman + offset, RegisterStates.PushFdBytes);
-						offset += RegisterStates.PushFdBytes.Length;
-					}
-
-					Writer.WriteBytes(middleman + offset, originalBytes);
-					offset += originalBytes.Length;
-
-					*(byte*) (middleman + offset) = 0xE9;
-					*(uint*) (middleman + offset + 1) = HelperMethods.CalculateRelativeAddressForJmp((uint) (middleman + offset), (uint) Marshal.GetFunctionPointerForDelegate(hook));
-
-					// Orig func region to original func
-					offset = 0;
-					if (compabilityModeEnabled)
-					{
-						Writer.WriteBytes(origFunc, RegisterStates.PopAdBytes);
-						offset += RegisterStates.PopAdBytes.Length;
-
-						Writer.WriteBytes(origFunc + offset, RegisterStates.PopFdBytes);
-						offset += RegisterStates.PopFdBytes.Length;
-					}
-
-					Writer.WriteBytes(origFunc + offset, originalBytes);
-					offset += originalBytes.Length;
-
-					*(byte*) (origFunc + offset) = 0xE9;
-					*(uint*) (origFunc + offset + 1) = HelperMethods.CalculateRelativeAddressForJmp((uint) (origFunc + offset), (uint)(Target + numBytes));
-
-					Original = Marshal.GetDelegateForFunctionPointer<T>(origFunc);
-					if (origHandle.IsAllocated)
-						origHandle.Free();
-					origHandle = GCHandle.Alloc(Original, GCHandleType.Normal);
-
-					// Target To Middleman
-					*(byte*)Target = 0xE9;
-					*(uint*)(Target + 1) = HelperMethods.CalculateRelativeAddressForJmp((uint)Target, (uint)middleman);
-
-					for (int n = 0; n < numBytes - 5; n++)
-						*(byte*)((Target + 5) + n) = 0x90;
-
-
-					Protection.SetPageProtection(Target, numBytes, oldProtection, out _);
-					IsEnabled = true;
-					return IsEnabled;
-				}
-
-				public bool Uninstall()
-				{
-					if (!IsEnabled)
-						return false;
-
-
-					IsEnabled = false;
-					return IsEnabled;
-				}
-			}
-
-			public unsafe class CodeExecutionCallback
-			{
-				public readonly IntPtr InstallLocation;
-				public bool IsInstalled { get; private set; }
-
-				private readonly int _count;
-				private byte[] _orig;
-				private readonly IntPtr _func;
-				private readonly GCHandle _funcGC;
-				private readonly Structures.RegisterStates _registerstates;
-
-				public CodeExecutionCallback(IntPtr location, Delegate callback, int numBytesOverwrite = 5)
-				{
-					if (location == IntPtr.Zero)
-						throw new InvalidOperationException("");
-
-					if (numBytesOverwrite < 5)
-						throw new InvalidOperationException("");
-
-
-					InstallLocation = location;
-					_count = numBytesOverwrite;
-					_func = Marshal.GetFunctionPointerForDelegate(callback);
-					_funcGC = GCHandle.Alloc(_func);
-
-					_registerstates = new Structures.RegisterStates();
-					_registerstates.GeneratePushAd();
-					_registerstates.GeneratePopAd();
-					_registerstates.GeneratePushFd();
-					_registerstates.GeneratePopFd();
-				}
-
-				public void Install(bool verbose = false)
-				{
-					if (IsInstalled)
-						return;
-
-					if (_orig == null)
-						_orig = Reader.ReadBytes(InstallLocation, (uint) _count);
-
-					if (verbose) Console.WriteLine($"Read {_orig.Length} bytes from 0x{InstallLocation.ToInt32():X8}");
-
-					/*
-					IntPtr region = Allocator.Unmanaged.Extended.AllocateHeap((uint) b.Length
-					                                                          + (uint) _registerstates.PushAdBytes.Length
-					                                                          + (uint) _registerstates.PopAdBytes.Length
-					                                                          //+ (uint) _registerstates.PushFdBytes.Length
-					                                                          //+ (uint) _registerstates.PopFdBytes.Length
-					                                                          + 5);
-					*/
-
-					IntPtr region = Allocator.Unmanaged.Allocate((uint) _registerstates.PushAdBytes.Length
-					                                             + (uint)_registerstates.PushFdBytes.Length
-																 + (uint) _registerstates.PopAdBytes.Length
-					                                             + (uint)_registerstates.PopFdBytes.Length
-																 + 5 /* jmp to original code */);
-					if (region == null) throw new InvalidOperationException();
-					if (verbose) Console.WriteLine($"Allocated a new region - 0x{region.ToInt32():X8}");
-
-					Writer.WriteBytes(region, _orig);
-					if (verbose) Console.WriteLine($"Wrote original bytes at address 0x{region.ToInt32():X8}");
-					uint start = (uint) region + (uint) _orig.Length;
-
-
-					Writer.WriteBytes((IntPtr) start, _registerstates.PushFdBytes);
-					if (verbose) Console.WriteLine($"Wrote PushFD bytes at address 0x{start:X8}");
-					start += (uint) _registerstates.PushFdBytes.Length;
-					
-					Writer.WriteBytes((IntPtr) start, _registerstates.PushAdBytes);
-					if (verbose) Console.WriteLine($"Wrote PushAd bytes at address 0x{start:X8}");
-					start += (uint) _registerstates.PushAdBytes.Length;
-					
-
-					Assembler.AssembleMnemonics(new []
-					{
-						// Pushing our register address as our first param to
-						// our callback method
-						$"push 0x{(_registerstates.BaseAddress).ToInt32():X8}",
-					}, true, out byte[] push);
-
-					Writer.WriteBytes((IntPtr)start, push);
-					if (verbose) Console.WriteLine($"Wrote parameter push to callback at address 0x{start:X8}");
-					start += (uint) push.Length;
-					
-					*(byte*) start = 0xE8;
-					*(uint*) (start + 1) = CalculateRelativeAddressForJmp(start, (uint) _func); // call to callback
-					if (verbose) Console.WriteLine($"Wrote call to C# callback at address 0x{start:X8}");
-					start += 5;
-
-					Writer.WriteBytes((IntPtr)start, _registerstates.PopFdBytes);
-					if (verbose) Console.WriteLine($"Wrote PopFD bytes at address 0x{start:X8}");
-					start += (uint)_registerstates.PopFdBytes.Length;
-
-					Writer.WriteBytes((IntPtr)start, _registerstates.PopAdBytes);
-					if (verbose) Console.WriteLine($"Wrote PopAD bytes at address 0x{start:X8}");
-					start += (uint) _registerstates.PopAdBytes.Length;
-
-					*(byte*)start = 0xE9;
-					*(uint*) (start + 1) = CalculateRelativeAddressForJmp(start, (uint)InstallLocation + (uint)_count);
-					if (verbose) Console.WriteLine($"Wrote jmp from middleman region to start at address 0x{InstallLocation.ToInt32():X8}");
-
-					if (!Protection.SetPageProtection(InstallLocation, _count, Enums.MemoryProtection.ExecuteReadWrite, out var old))
-					{
-						Allocator.Unmanaged.FreeMemory(region);
-						if (verbose) Console.WriteLine($"Failed changing Page Protection of address 0x{InstallLocation.ToInt32():X8} to EXECUTE_READ_WRITE, returning...");
-						return;
-					}
-
-					if (verbose) Console.WriteLine($"Changed PageProtection of address 0x{InstallLocation.ToInt32():X8} to {Enums.MemoryProtection.ExecuteReadWrite.ToString()}");
-
-					*(byte*)InstallLocation = 0xE9;
-					*(uint*)(InstallLocation + 1) = CalculateRelativeAddressForJmp((uint)InstallLocation, (uint)region);
-
-					for (int n = 0; n < _count - 5; n++)
-						*(byte*)(InstallLocation + 5 + n) = 0x90;
-					if (verbose) Console.WriteLine($"Wrote {_count - 5} NOPs to address 0x{(InstallLocation + 5).ToInt32():X8}");
-
-					Protection.SetPageProtection(InstallLocation, _count, old, out _);
-					if (verbose) Console.WriteLine($"Restored Page Protection at adress 0x{InstallLocation.ToInt32():X8} to {old.ToString()}");
-
-					IsInstalled = true;
-				}
-
-				public void Uninstall()
-				{
-					if (!IsInstalled)
-						return;
-
-					Protection.SetPageProtection(InstallLocation, _count, Enums.MemoryProtection.ExecuteReadWrite, out var old);
-					Writer.WriteBytes(InstallLocation, _orig);
-					Protection.SetPageProtection(InstallLocation, _count, old, out _);
-				}
-			}
-
+			[Obsolete("Use class BasicHook<T> instead of HookObj<T>")]
 			public class HookObj<T> : IDisposable where T : Delegate
 			{
 				private bool _disposed;
@@ -530,7 +259,7 @@ namespace TestInject
 							*(byte*)(addrMiddleMan + n) = *(byte*)(TargetAddress + n);
 
 						*(byte*)((uint)addrMiddleMan + _overwrittenByteCount) = 0xE9;
-						*(uint*)((uint)addrMiddleMan + _overwrittenByteCount + 1) = HelperMethods.CalculateRelativeAddressForJmp(
+						*(uint*)((uint)addrMiddleMan + _overwrittenByteCount + 1) = HelperMethods.RelAddr(
 							(uint)addrMiddleMan + _overwrittenByteCount,
 							(uint)addrHook);
 
@@ -539,13 +268,13 @@ namespace TestInject
 							*(byte*)(addrOFuncAddress + n) = *(byte*)(TargetAddress + n);
 
 						*(byte*)((uint)addrOFuncAddress + _overwrittenByteCount) = 0xE9;
-						*(uint*)((uint)addrOFuncAddress + _overwrittenByteCount + 1) = HelperMethods.CalculateRelativeAddressForJmp(
+						*(uint*)((uint)addrOFuncAddress + _overwrittenByteCount + 1) = HelperMethods.RelAddr(
 							(uint)addrOFuncAddress + _overwrittenByteCount,
 							(uint)TargetAddress + _overwrittenByteCount);
 
 						// Target -> Middleman
 						*(byte*)TargetAddress = 0xE9;
-						*(uint*)(TargetAddress + 1) = HelperMethods.CalculateRelativeAddressForJmp((uint)TargetAddress, (uint)addrMiddleMan);
+						*(uint*)(TargetAddress + 1) = HelperMethods.RelAddr((uint)TargetAddress, (uint)addrMiddleMan);
 
 						for (int n = 0; n < _overwrittenByteCount - 5; n++)
 							*(byte*)(TargetAddress + 5 + n) = 0x90;
@@ -619,6 +348,594 @@ namespace TestInject
 
 						_disposed = true;
 					}
+				}
+			}
+
+			[Obsolete("Use class BasicHook<T> instead of Hook<T>")]
+			public unsafe class Hook<T> where T : Delegate
+			{
+				public readonly IntPtr Target;
+				public bool IsEnabled;
+
+				public T Original;
+				private GCHandle origHandle;
+
+				private GCHandle hookHandle;
+				private Delegate hook;
+
+				private byte[] originalBytes;
+				private bool compabilityModeEnabled;
+				public Structures.RegisterStates RegisterStates;
+				private int numBytes;
+
+				private IntPtr middleman;
+				private IntPtr origFunc;
+
+
+				public Hook(IntPtr target, Delegate hook, bool compabilityMode = true, int prologueLengthFixup = 5)
+				{
+					if (prologueLengthFixup < 5)
+						throw new InvalidOperationException($"Need atleast 5 bytes");
+
+					if (target == IntPtr.Zero)
+						throw new InvalidOperationException($"Target cannot be null");
+
+					this.hook = hook ?? throw new InvalidOperationException($"Hook cannot be null");
+					hookHandle = GCHandle.Alloc(hook, GCHandleType.Normal);
+					compabilityModeEnabled = compabilityMode;
+					RegisterStates = compabilityModeEnabled ? new Structures.RegisterStates() : null;
+
+					if (compabilityMode && RegisterStates != null)
+					{
+						RegisterStates.GeneratePopFd(true);
+						RegisterStates.GeneratePushFd(true);
+
+						RegisterStates.GeneratePushAd(true);
+						RegisterStates.GeneratePopAd(true);
+					}
+
+					Target = target;
+					numBytes = prologueLengthFixup;
+					originalBytes = Reader.ReadBytes(Target, (uint)numBytes);
+
+					middleman = Allocator.Unmanaged.Allocate(5 + (uint)prologueLengthFixup + 
+					                                         (compabilityMode ? (uint)RegisterStates.PushAdBytes.Length + (uint)RegisterStates.PushFdBytes.Length : 0));
+					if (middleman == IntPtr.Zero)
+						throw new InvalidOperationException($"Failed to allocate memory for middleman");
+
+					origFunc = Allocator.Unmanaged.Allocate(5 + (uint) prologueLengthFixup + 
+					                                        (compabilityMode ? (uint) RegisterStates.PopAdBytes.Length + (uint)RegisterStates.PopFdBytes.Length : 0));
+					if (origFunc == IntPtr.Zero)
+					{
+						if (middleman != IntPtr.Zero)
+							Allocator.Unmanaged.FreeMemory(middleman);
+
+						throw new InvalidOperationException($"Failed allocating memory for orig func");
+					}
+
+					Original = Marshal.GetDelegateForFunctionPointer<T>(Target);
+					origHandle = GCHandle.Alloc(Original, GCHandleType.Normal);
+
+					Console.Title = $"Middleman: 0x{middleman.ToInt32():X8}, Orig Func: 0x{origFunc.ToInt32():X8}";
+					Console.WriteLine($"Middleman: 0x{middleman.ToInt32():X8}, Orig Func: 0x{origFunc.ToInt32():X8}");
+				}
+
+				public bool Install()
+				{
+					if (IsEnabled)
+						return false;
+
+					Protection.SetPageProtection(Target, numBytes, Enums.MemoryProtection.ExecuteReadWrite, out var oldProtection);
+
+					int offset = 0;
+					// Middleman to hook
+					if (compabilityModeEnabled)
+					{
+						Writer.WriteBytes(middleman, RegisterStates.PushAdBytes);
+						offset += RegisterStates.PushAdBytes.Length;
+
+						Writer.WriteBytes(middleman + offset, RegisterStates.PushFdBytes);
+						offset += RegisterStates.PushFdBytes.Length;
+					}
+
+					Writer.WriteBytes(middleman + offset, originalBytes);
+					offset += originalBytes.Length;
+
+					*(byte*) (middleman + offset) = 0xE9;
+					*(uint*) (middleman + offset + 1) = HelperMethods.RelAddr((uint) (middleman + offset), (uint) Marshal.GetFunctionPointerForDelegate(hook));
+
+					// Orig func region to original func
+					offset = 0;
+					if (compabilityModeEnabled)
+					{
+						Writer.WriteBytes(origFunc, RegisterStates.PopAdBytes);
+						offset += RegisterStates.PopAdBytes.Length;
+
+						Writer.WriteBytes(origFunc + offset, RegisterStates.PopFdBytes);
+						offset += RegisterStates.PopFdBytes.Length;
+					}
+
+					Writer.WriteBytes(origFunc + offset, originalBytes);
+					offset += originalBytes.Length;
+
+					*(byte*) (origFunc + offset) = 0xE9;
+					*(uint*) (origFunc + offset + 1) = HelperMethods.RelAddr((uint) (origFunc + offset), (uint)(Target + numBytes));
+
+					Original = Marshal.GetDelegateForFunctionPointer<T>(origFunc);
+					if (origHandle.IsAllocated)
+						origHandle.Free();
+					origHandle = GCHandle.Alloc(Original, GCHandleType.Normal);
+
+					// Target To Middleman
+					*(byte*)Target = 0xE9;
+					*(uint*)(Target + 1) = HelperMethods.RelAddr((uint)Target, (uint)middleman);
+
+					for (int n = 0; n < numBytes - 5; n++)
+						*(byte*)((Target + 5) + n) = 0x90;
+
+
+					Protection.SetPageProtection(Target, numBytes, oldProtection, out _);
+					IsEnabled = true;
+					return IsEnabled;
+				}
+
+				public bool Uninstall()
+				{
+					if (!IsEnabled)
+						return false;
+
+
+					IsEnabled = false;
+					return IsEnabled;
+				}
+			}
+
+			public unsafe class CodeExecutionCallback
+			{
+				public readonly IntPtr InstallLocation;
+				public bool IsInstalled { get; private set; }
+
+				private readonly int _count;
+				private byte[] _orig;
+				private readonly IntPtr _func;
+				private readonly GCHandle _funcGC;
+				private readonly Structures.RegisterStates _registerstates;
+				private IntPtr _region;
+
+				public CodeExecutionCallback(IntPtr location, Structures.CallbackDelegate callback, int numBytesOverwrite = 5)
+				{
+					if (location == IntPtr.Zero)
+						throw new InvalidOperationException("");
+
+					if (numBytesOverwrite < 5)
+						throw new InvalidOperationException("");
+
+
+					InstallLocation = location;
+					_count = numBytesOverwrite;
+					_func = Marshal.GetFunctionPointerForDelegate(callback);
+					_funcGC = GCHandle.Alloc(_func);
+
+					_registerstates = new Structures.RegisterStates();
+					_registerstates.GeneratePushAd();
+					_registerstates.GeneratePopAd();
+					_registerstates.GeneratePushFd();
+					_registerstates.GeneratePopFd();
+				}
+
+				public void Install(bool verbose = false)
+				{
+					if (IsInstalled)
+						return;
+
+					if (_orig == null)
+						_orig = Reader.ReadBytes(InstallLocation, (uint) _count);
+
+					if (verbose) Console.WriteLine($"Read {_orig.Length} bytes from 0x{InstallLocation.ToInt32():X8}");
+
+
+					if (_region == IntPtr.Zero)
+					{
+						_region = Allocator.Unmanaged.Allocate((uint)_registerstates.PushAdBytes.Length
+						                                       + (uint)_registerstates.PushFdBytes.Length
+						                                       + (uint)_registerstates.PopAdBytes.Length
+						                                       + (uint)_registerstates.PopFdBytes.Length
+						                                       + 5 /* jmp to original code */);
+
+						if (_region == IntPtr.Zero)
+						{
+							if (verbose) Console.WriteLine($"Failed allocating a new region for callback");
+							throw new InvalidOperationException();
+						}
+
+						if (verbose) Console.WriteLine($"Allocated a new region - 0x{_region.ToInt32():X8}");
+					}
+					else
+						if (verbose) Console.WriteLine($"Using old region for callback - 0x{_region.ToInt32():X8}");
+
+
+					Writer.WriteBytes(_region, _orig);
+					if (verbose) Console.WriteLine($"Wrote original bytes at address 0x{_region.ToInt32():X8}");
+					uint start = (uint)_region + (uint) _orig.Length;
+
+
+					Writer.WriteBytes((IntPtr) start, _registerstates.PushFdBytes);
+					if (verbose) Console.WriteLine($"Wrote PushFD bytes at address 0x{start:X8}");
+					start += (uint) _registerstates.PushFdBytes.Length;
+					
+					Writer.WriteBytes((IntPtr) start, _registerstates.PushAdBytes);
+					if (verbose) Console.WriteLine($"Wrote PushAd bytes at address 0x{start:X8}");
+					start += (uint) _registerstates.PushAdBytes.Length;
+					
+					Assembler.AssembleMnemonics(new []
+					{
+						$"push 0x{(_registerstates.BaseAddress).ToInt32():X8}",
+					}, true, out byte[] push);
+
+					Writer.WriteBytes((IntPtr)start, push);
+					if (verbose) Console.WriteLine($"Wrote parameter push to callback at address 0x{start:X8}");
+					start += (uint) push.Length;
+					
+					*(byte*) start = 0xE8;
+					*(uint*) (start + 1) = RelAddr(start, (uint) _func); // call to callback
+					if (verbose) Console.WriteLine($"Wrote call to C# callback at address 0x{start:X8}");
+					start += 5;
+
+					Writer.WriteBytes((IntPtr)start, _registerstates.PopFdBytes);
+					if (verbose) Console.WriteLine($"Wrote PopFD bytes at address 0x{start:X8}");
+					start += (uint)_registerstates.PopFdBytes.Length;
+
+					Writer.WriteBytes((IntPtr)start, _registerstates.PopAdBytes);
+					if (verbose) Console.WriteLine($"Wrote PopAD bytes at address 0x{start:X8}");
+					start += (uint) _registerstates.PopAdBytes.Length;
+
+					*(byte*)start = 0xE9;
+					*(uint*) (start + 1) = RelAddr(start, (uint)InstallLocation + (uint)_count);
+					if (verbose) Console.WriteLine($"Wrote jmp from middleman region to start at address 0x{InstallLocation.ToInt32():X8}");
+
+					if (!Protection.SetPageProtection(InstallLocation, _count, Enums.MemoryProtection.ExecuteReadWrite, out var old))
+					{
+						Allocator.Unmanaged.FreeMemory(_region);
+						if (verbose) Console.WriteLine($"Failed changing Page Protection of address 0x{InstallLocation.ToInt32():X8} to {Enums.MemoryProtection.ExecuteReadWrite.ToString()}, returning...");
+						return;
+					}
+
+					if (verbose) Console.WriteLine($"Changed PageProtection of address 0x{InstallLocation.ToInt32():X8} to {Enums.MemoryProtection.ExecuteReadWrite.ToString()}");
+
+					*(byte*)InstallLocation = 0xE9;
+					*(uint*)(InstallLocation + 1) = RelAddr((uint)InstallLocation, (uint)_region);
+
+					for (int n = 0; n < _count - 5; n++)
+						*(byte*)(InstallLocation + 5 + n) = 0x90;
+					if (verbose) Console.WriteLine($"Wrote {_count - 5} NOPs to address 0x{(InstallLocation + 5).ToInt32():X8}");
+
+					Protection.SetPageProtection(InstallLocation, _count, old, out _);
+					if (verbose) Console.WriteLine($"Restored Page Protection at adress 0x{InstallLocation.ToInt32():X8} to {old.ToString()}");
+
+					IsInstalled = true;
+				}
+
+				public void Uninstall()
+				{
+					if (!IsInstalled)
+						return;
+
+					Protection.SetPageProtection(InstallLocation, _count, Enums.MemoryProtection.ExecuteReadWrite, out var old);
+					Writer.WriteBytes(InstallLocation, _orig);
+					Protection.SetPageProtection(InstallLocation, _count, old, out _);
+
+					IsInstalled = false;
+				}
+			}
+
+			public unsafe class BasicHook<T> where T : Delegate
+			{
+				public bool bIsInstalled;
+
+				public readonly IntPtr dwInstallAddress;
+				private readonly IntPtr dwRegistersBaseAddress;
+				public readonly Structures.RegisterStates Registers;
+
+				public T CleanOriginal { get; private set; }
+				private GCHandle _cleanOriginalHandle;
+
+				private readonly int _overwriteCount;
+				
+				private readonly Delegate _hkMethod;
+				private readonly GCHandle _hkMethodHandle;
+				private readonly IntPtr _hkMethodAddress;
+
+				private readonly byte[] _origBytes;
+				private readonly IntPtr _middleman;
+
+				public BasicHook(IntPtr installLocation, Delegate hkMethod, int byteOverwriteCount = 5)
+				{
+					if (installLocation == IntPtr.Zero || byteOverwriteCount < 5)
+						throw new Exception("ERROR");
+
+					dwInstallAddress = installLocation;
+					_overwriteCount = byteOverwriteCount;
+					_origBytes = Reader.ReadBytes(dwInstallAddress, (uint) _overwriteCount);
+
+					Registers = new Structures.RegisterStates();
+					Registers.GeneratePushAd(true);
+					Registers.GeneratePushFd(true);
+					Registers.GeneratePopAd(true);
+					Registers.GeneratePopFd(true);
+					dwRegistersBaseAddress = Registers.BaseAddress;
+
+					_hkMethod = hkMethod;
+					_hkMethodHandle = GCHandle.Alloc(_hkMethod, GCHandleType.Normal);
+					_hkMethodAddress = Marshal.GetFunctionPointerForDelegate(_hkMethod);
+
+					_middleman = Allocator.Unmanaged.Allocate(0x10000);
+					if (_middleman == IntPtr.Zero)
+						throw new Exception("ERROR");
+
+					CleanOriginal = Marshal.GetDelegateForFunctionPointer<T>(dwInstallAddress);
+					_cleanOriginalHandle = GCHandle.Alloc(CleanOriginal, GCHandleType.Normal);
+				}
+
+				public void Install()
+				{
+					if (bIsInstalled)
+						return;
+
+					int offset = 0;
+
+					#region Fix Clean Unhooked Function
+					IntPtr clean = Allocator.Unmanaged.Allocate(0x10000);
+					if (clean == IntPtr.Zero)
+						throw new Exception("ERROR");
+
+					Writer.WriteBytes(clean, Registers.PopAdBytes);
+					offset += Registers.PopAdBytes.Length;
+
+					Writer.WriteBytes(clean + offset, Registers.PopFdBytes);
+					offset += Registers.PopFdBytes.Length;
+
+					Writer.WriteBytes(clean + offset, _origBytes);
+					offset += _origBytes.Length;
+
+					*(byte*) (clean + offset) = 0xE9;
+					offset++;
+					*(uint*) (clean + offset) = RelAddr((uint) (clean + (offset - 1)), (uint) (dwInstallAddress +  _overwriteCount));
+
+					offset += 4;
+					*(byte*) (clean + offset) = 0xC3;
+					offset += 1;
+
+					Protection.SetPageProtection(clean, _origBytes.Length + 5, Enums.MemoryProtection.ExecuteRead, out _);
+					CleanOriginal = Marshal.GetDelegateForFunctionPointer<T>(clean);
+					if (_cleanOriginalHandle.IsAllocated)
+						_cleanOriginalHandle.Free();
+
+					_cleanOriginalHandle = GCHandle.Alloc(CleanOriginal, GCHandleType.Normal);
+					Console.WriteLine($"Clean Function Address: 0x{clean.ToInt32():X8}");
+					offset = 0;
+					#endregion
+
+					#region Fix Jmp To Hook with Restore States
+
+					IntPtr fixedJmpToHook = Allocator.Unmanaged.Allocate(0x10000);
+
+					*(byte*) (fixedJmpToHook) = 0xE8;
+					*(uint*) (fixedJmpToHook + 1) = RelAddr((uint)fixedJmpToHook, (uint)_hkMethodAddress);
+					offset += 5;
+
+					*(byte*)(fixedJmpToHook + offset) = 0xE9;
+					*(uint*) (fixedJmpToHook + offset + 1) = RelAddr((uint) (fixedJmpToHook + offset), 
+						(uint) (_middleman 
+						        + _origBytes.Length
+						        + Registers.PushAdBytes.Length
+						        + Registers.PushFdBytes.Length
+						        + 5));
+
+					Console.WriteLine($"Fixed Jmp to Hook Address: 0x{fixedJmpToHook.ToInt32():X8}");
+
+					offset = 0;
+					#endregion
+
+					Writer.WriteBytes(_middleman, _origBytes);
+					offset += _origBytes.Length;
+
+					Writer.WriteBytes(_middleman + offset, Registers.PushAdBytes);
+					offset += Registers.PushAdBytes.Length;
+
+					Writer.WriteBytes(_middleman + offset, Registers.PushFdBytes);
+					offset += Registers.PushFdBytes.Length;
+
+					*(byte*) (_middleman + offset) = 0xE9; // JMP
+					*(uint*) (_middleman + offset + 1) = RelAddr((uint) (_middleman + offset), (uint) fixedJmpToHook);
+					offset += 5;
+
+					Writer.WriteBytes(_middleman + offset, Registers.PopAdBytes);
+					offset += Registers.PopAdBytes.Length;
+
+					Writer.WriteBytes(_middleman + offset, Registers.PopFdBytes);
+					offset += Registers.PopFdBytes.Length;
+
+					Writer.WriteBytes(_middleman + offset, new byte[] { 0xC3 });
+					offset += 1;
+
+					offset = 0;
+					Console.WriteLine($"Middleman: 0x{_middleman.ToInt32():X8}");
+
+					Protection.SetPageProtection(dwInstallAddress, _overwriteCount, Enums.MemoryProtection.ExecuteReadWrite, out var old);
+					*(byte*) (dwInstallAddress) = 0xE9;
+					*(uint*) (dwInstallAddress + 1) = RelAddr((uint)dwInstallAddress, (uint) (_middleman));
+
+					offset += 5;
+
+					for (int n = 0; n < _overwriteCount - 5; n++)
+						*(byte*)(dwInstallAddress + (offset + n)) = 0x90;
+
+					Protection.SetPageProtection(dwInstallAddress, _overwriteCount, old, out _);
+
+					bIsInstalled = true;
+				}
+
+			}
+
+			public unsafe class Hk<T>
+			{
+				public T ContinueExecution { get; private set; }
+
+				public Structures.RegisterStates Registers { get; private set; }
+				public bool IsInstalled => backingIsInstalled;
+				public readonly uint InstalledAt;
+
+				#region Private Fields/Variables
+				private readonly uint numBytes = 5;
+
+				private readonly uint hkMethodAddress;
+				private readonly GCHandle hkMethodGCHandle;
+
+				private readonly byte[] overwrittenBytes;
+
+				private readonly uint middlemanRegion;
+				private uint unhookedOriginal;
+
+				private bool backingIsInstalled = false;
+
+				// for verbose
+				private bool v = false;
+				#endregion
+
+				public Hk(uint InstallLocation, T hkMethod, uint PrologueByteLengthOverwrite = 5, bool verbose = false)
+				{
+					v = verbose;
+
+					Stopwatch ts = v ? Stopwatch.StartNew() : null;
+					if (InstallLocation == 0)
+						throw new InvalidOperationException($"Parameter 'InstallLocation' cannot be 0");
+
+					if (PrologueByteLengthOverwrite < 5)
+						throw new InvalidOperationException($"Parameter 'PrologueByteLengthOverwrite' cannot be less than 5 bytes");
+
+					InstalledAt = InstallLocation;
+					numBytes = PrologueByteLengthOverwrite;
+
+					overwrittenBytes = Reader.ReadBytes(new IntPtr(InstalledAt), numBytes);
+					if (v) Console.WriteLine($"Read and stored {numBytes} bytes from 0x{InstalledAt:X8} (Original Overwriten Bytes)");
+
+					Registers = new Structures.RegisterStates();
+					if (Registers.BaseAddress == IntPtr.Zero)
+						throw new InsufficientMemoryException($"Failed allocating for struct 'RegisterStates'");
+
+					if (v) Console.WriteLine($"RegisterStates Base Address: 0x{Registers.BaseAddress.ToInt32():X8}");
+
+					middlemanRegion = (uint)Allocator.Unmanaged.Allocate(0x10000);
+					if (middlemanRegion == 0)
+					{
+						Allocator.Unmanaged.FreeMemory(Registers.BaseAddress);
+						throw new InsufficientMemoryException($"Failed allocating for field 'middlemanRegion'");
+					}
+
+					if (v) Console.WriteLine($"Middleman Base Address: 0x{middlemanRegion:X8}");
+
+					// This is the slow part
+					Registers.GeneratePushAd(true);
+					Registers.GeneratePushFd(true);
+					Registers.GeneratePopAd(true);
+					Registers.GeneratePopFd(true);
+					if (v) Console.WriteLine($"Generation of PushAd/PushFd && PopAd/PopFd completed!");
+
+					hkMethodAddress = (uint)Marshal.GetFunctionPointerForDelegate(hkMethod);
+					hkMethodGCHandle = GCHandle.Alloc(hkMethodAddress, GCHandleType.Normal);
+					if (v) Console.WriteLine($"Hook Method Address: 0x{hkMethodAddress:X8}");
+
+					ContinueExecution = Marshal.GetDelegateForFunctionPointer<T>(new IntPtr(InstalledAt));
+
+					if (v) Console.WriteLine($"Initialization phase took {ts.ElapsedMilliseconds} ms");
+				}
+
+				public void Install()
+				{
+					if (backingIsInstalled)
+						return;
+
+					int offset = 0;
+
+					#region Middleman -> (Target + Num Bytes) & Middleman -> HookMethod
+					// Original Bytes
+					Writer.WriteBytes((IntPtr)middlemanRegion + offset, overwrittenBytes); offset += overwrittenBytes.Length;
+
+					// PushAD/PushFD
+					Writer.WriteBytes((IntPtr)middlemanRegion + offset, Registers.PushAdBytes); offset += Registers.PushAdBytes.Length;
+					Writer.WriteBytes((IntPtr)middlemanRegion + offset, Registers.PushFdBytes); offset += Registers.PushFdBytes.Length;
+
+					// Call/Jmp to hook
+					*(byte*)(middlemanRegion + offset) = 0xE9;
+					*(uint*) (middlemanRegion + offset + 1) = RelAddr((uint)(middlemanRegion + offset), hkMethodAddress); offset += 5;
+
+					// Pop AD
+					Writer.WriteBytes((IntPtr)middlemanRegion + offset, Registers.PopAdBytes); offset += Registers.PopAdBytes.Length;
+
+					// PopFD
+					Writer.WriteBytes((IntPtr)middlemanRegion + offset, Registers.PopFdBytes); offset += Registers.PopFdBytes.Length;
+
+					// Jmp back to original code
+					*(byte*) (middlemanRegion + offset) = 0xE9;
+					*(uint*) (middlemanRegion + offset + 1) = RelAddr((uint) (middlemanRegion + offset), InstalledAt + numBytes);
+
+					if (v) Console.WriteLine($"Middleman Region: 0x{middlemanRegion:X8}");
+					offset = 0;
+					#endregion
+
+					#region Creating unmodified function delegate
+					if (unhookedOriginal == 0)
+					{
+						unhookedOriginal = (uint)Allocator.Unmanaged.Allocate(0x10000);
+						if (unhookedOriginal == 0)
+						{
+							if (middlemanRegion == 0)
+								Allocator.Unmanaged.FreeMemory((IntPtr) middlemanRegion);
+							throw new InvalidOperationException("err");
+						}
+					}
+
+					Writer.WriteBytes((IntPtr)unhookedOriginal + offset, Registers.PopAdBytes); offset += Registers.PopAdBytes.Length;
+					Writer.WriteBytes((IntPtr)unhookedOriginal + offset, Registers.PopFdBytes); offset += Registers.PopFdBytes.Length;
+
+					Writer.WriteBytes((IntPtr)unhookedOriginal + offset, overwrittenBytes); offset += overwrittenBytes.Length;
+
+					*(byte*) (unhookedOriginal + offset) = 0xE9;
+					*(uint*) (unhookedOriginal + offset + 1) = RelAddr((uint)(unhookedOriginal + offset), InstalledAt + numBytes); offset += 5;
+
+					*(byte*) (unhookedOriginal + offset) = 0xC3; offset += 1;
+
+					ContinueExecution = Marshal.GetDelegateForFunctionPointer<T>((IntPtr)unhookedOriginal);
+					if (v) Console.WriteLine($"Unhooked Function: 0x{unhookedOriginal:X8}");
+					offset = 0;
+					#endregion
+
+					#region Target -> Middleman
+					Protection.SetPageProtection(new IntPtr(InstalledAt), (int)numBytes, Enums.MemoryProtection.ExecuteReadWrite, out var old);
+					*(byte*)(InstalledAt + offset) = 0xE9; offset++;
+					*(uint*)(InstalledAt + offset) = RelAddr(InstalledAt, middlemanRegion); offset += 4;
+
+					for (int n = 0; n < numBytes - 5; n++)
+						*(byte*)((InstalledAt + offset) + n) = 0x90;
+
+					Protection.SetPageProtection(new IntPtr(InstalledAt), (int)numBytes, old, out _);
+					offset = 0;
+					#endregion
+
+					backingIsInstalled = true;
+				}
+				public void Uninstall()
+				{
+					if (!backingIsInstalled)
+						return;
+
+					int offset = 0;
+
+					Protection.SetPageProtection(new IntPtr(InstalledAt), (int)numBytes, Enums.MemoryProtection.ExecuteReadWrite, out var old);
+					Writer.WriteBytes((IntPtr)InstalledAt, overwrittenBytes); offset += overwrittenBytes.Length;
+					Protection.SetPageProtection(new IntPtr(InstalledAt), (int)numBytes, old, out _);
+
+					backingIsInstalled = false;
 				}
 			}
 		}
@@ -700,7 +1017,7 @@ namespace TestInject
 				return 0;
 			}
 
-			public static unsafe List<long> FindPattern(string pattern, string optionalModuleName = "", bool readable = true, bool writable = true, bool executable = true)
+			public static unsafe List<long> FindPattern(string pattern, string? optionalModuleName, bool readable, bool writable, bool executable)
 			{
 				#region Creation of Byte Array from string pattern
 				var tmpSplitPattern = pattern.TrimStart(' ').TrimEnd(' ').Split(' ');
@@ -747,7 +1064,7 @@ namespace TestInject
 				ConcurrentQueue<long> results = new ConcurrentQueue<long>();
 
 				ProcessModule pm = null;
-				if (optionalModuleName != "")
+				if (!string.IsNullOrEmpty(optionalModuleName))
 				{
 					UpdateProcessInformation();
 					pm = HostProcess.FindProcessModule(optionalModuleName);
@@ -810,6 +1127,7 @@ namespace TestInject
 
 							if (isValid)
 								regions.Add((buff->BaseAddress, buff->RegionSize));
+
 						}
 
 						lpMem = (uint)buff->BaseAddress + (uint)buff->RegionSize;
@@ -831,7 +1149,6 @@ namespace TestInject
 
 				return results.ToList().OrderBy(address => address).ToList();
 			}
-
 		}
 
 		public class Assembler
@@ -909,45 +1226,16 @@ namespace TestInject
 
 		public class Allocator
 		{
-			public class SmartAllocation
-			{
-				public readonly IntPtr Base;
-
-				public uint BytesLeft;
-				public IntPtr UnallocatedPositionStart;
-
-				public List<(IntPtr InnerAllocationBase, string Identifier)> Allocations;
-
-				public SmartAllocation()
-				{
-					Base = Unmanaged.Allocate(0x10000);
-					if (Base == IntPtr.Zero)
-						throw new Exception();
-
-					UnallocatedPositionStart = Base;
-					BytesLeft = 0x10000;
-					Allocations = new List<(IntPtr InnerAllocationBase, string Identifier)>();
-				}
-
-				public IntPtr Allocate(uint numBytes, string identifier)
-				{
-					if (numBytes == 0 || numBytes > BytesLeft || BytesLeft < 1)
-						throw new Exception($"Cannot allocate");
-
-					IntPtr start = UnallocatedPositionStart;
-
-					UnallocatedPositionStart = IntPtr.Add(UnallocatedPositionStart, (int)numBytes);
-					BytesLeft -= numBytes;
-
-					Allocations.Add((start, identifier));
-					return start;
-				}
- 			}
-
 			public class Managed
 			{
-				public static IntPtr ManagedAllocate(int size)
-					=> Marshal.AllocHGlobal(size);
+				public static IntPtr ManagedAllocate(int size, Enums.MemoryProtection flMemProtectType = Enums.MemoryProtection.ExecuteReadWrite)
+				{
+					IntPtr alloc = Marshal.AllocHGlobal(size);
+					if (alloc != IntPtr.Zero)
+						Protection.SetPageProtection(alloc, size, flMemProtectType, out var old);
+
+					return alloc;
+				}
 
 				public static void ManagedFree(IntPtr address)
 					=> Marshal.FreeHGlobal(address);
@@ -983,6 +1271,107 @@ namespace TestInject
 						return _heapObject != IntPtr.Zero && PInvoke.HeapFree(_heapObject, dwFlags, addr);
 					}
 				}
+			}
+
+			public IntPtr FindEmptySpaceInRegion(IntPtr targetRegion, int desiredSize)
+			{
+				IntPtr minAddress = IntPtr.Subtract(targetRegion, 0x70000000);
+				IntPtr maxAddress = IntPtr.Add(targetRegion, 0x70000000);
+
+				IntPtr ret = IntPtr.Zero;
+				IntPtr tmpAddress = IntPtr.Zero;
+
+				Structures.SYSTEM_INFO si = new Structures.SYSTEM_INFO();
+				PInvoke.GetSystemInfo(ref si);
+
+				if (Environment.Is64BitProcess)
+				{
+					if ((long)minAddress > (long)si.lpMaximumApplicationAddress ||
+					    (long)minAddress < (long)si.lpMinimumApplicationAddress)
+						minAddress = si.lpMinimumApplicationAddress;
+
+					if ((long)maxAddress < (long)si.lpMinimumApplicationAddress ||
+					    (long)maxAddress > (long)si.lpMaximumApplicationAddress)
+						maxAddress = si.lpMaximumApplicationAddress;
+				}
+				else
+				{
+					minAddress = si.lpMinimumApplicationAddress;
+					maxAddress = si.lpMaximumApplicationAddress;
+				}
+
+				IntPtr current = minAddress;
+				IntPtr previous = current;
+
+				while (PInvoke.VirtualQuery(current, out var mbi, (uint) Marshal.SizeOf<Structures.MEMORY_BASIC_INFORMATION>()) != 0)
+				{
+					if ((long) mbi.BaseAddress > (long) maxAddress)
+						return IntPtr.Zero; // No memory found, let windows handle
+
+					if (mbi.State == Enums.MemoryState.MEM_FREE && (int) mbi.RegionSize > desiredSize)
+					{
+						if ((long) mbi.BaseAddress % si.dwAllocationGranularity > 0)
+						{
+							// The whole size can not be used
+							tmpAddress = mbi.BaseAddress;
+							int offset = (int) (si.dwAllocationGranularity -
+							                    ((long) tmpAddress % si.dwAllocationGranularity));
+							// Check if there is enough left
+							if ((int) (mbi.RegionSize - offset) >= desiredSize)
+							{
+								if ((long) tmpAddress < (long)targetRegion)
+								{
+									tmpAddress = IntPtr.Add(tmpAddress, (int)(mbi.RegionSize - offset - desiredSize));
+
+									if ((long)tmpAddress > (long)targetRegion)
+										tmpAddress = targetRegion;
+
+									// decrease tmpAddress until its alligned properly
+									tmpAddress = IntPtr.Subtract(tmpAddress, (int)((long)tmpAddress % si.dwAllocationGranularity));
+								}
+
+								if (Math.Abs((long)tmpAddress - (long)targetRegion) < Math.Abs((long)ret - (long)targetRegion))
+									ret = tmpAddress;
+							}
+						}
+						else
+						{
+							tmpAddress = mbi.BaseAddress;
+
+							if ((long)tmpAddress < (long)targetRegion) // try to get it the cloest possible 
+								// (so to the end of the region - size and
+								// aligned by system allocation granularity)
+							{
+								tmpAddress = IntPtr.Add(tmpAddress, (int)(mbi.RegionSize - desiredSize));
+
+								if ((long)tmpAddress > (long)targetRegion)
+									tmpAddress = targetRegion;
+
+								// decrease until aligned properly
+								tmpAddress =
+									IntPtr.Subtract(tmpAddress, (int)((long)tmpAddress % si.dwAllocationGranularity));
+							}
+
+							if (Math.Abs((long)tmpAddress - (long)targetRegion) < Math.Abs((long)ret - (long)targetRegion))
+								ret = tmpAddress;
+						}
+					}
+
+					if ((int)mbi.RegionSize % si.dwAllocationGranularity > 0)
+						mbi.RegionSize += (int)(si.dwAllocationGranularity - ((int)mbi.RegionSize % (int)si.dwAllocationGranularity));
+
+					previous = current;
+					current = IntPtr.Add(mbi.BaseAddress, (int)mbi.RegionSize);
+
+					if ((long)current > (long)maxAddress)
+						return ret;
+
+					if ((long)previous > (long)current)
+						return ret; // Overflow
+
+				}
+
+				return IntPtr.Zero;
 			}
 		}
 
@@ -1074,6 +1463,9 @@ namespace TestInject
 
 		public class Structures
 		{
+			[UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+			public unsafe delegate void CallbackDelegate(IntPtr addrRegisterStruct);
+
 			public unsafe class RegisterStates
 			{
 				// Manually saving values of all general purpose registers and EFLAGS
@@ -1086,7 +1478,7 @@ namespace TestInject
 				public byte[] PopFdBytes { get; private set; }
 				public byte[] PushFdBytes { get; private set; }
 
-				public Structures.Registers* RegisterStructPointer { get; private set; }
+				public Registers* RegisterStructPointer { get; private set; }
 
 				public RegisterStates()
 				{
@@ -1096,7 +1488,7 @@ namespace TestInject
 					if (BaseAddress == IntPtr.Zero)
 						throw new InvalidOperationException();
 
-					RegisterStructPointer = (Structures.Registers*)BaseAddress;
+					RegisterStructPointer = (Registers*)BaseAddress;
 				}
 
 				// Pushad
@@ -1136,7 +1528,7 @@ namespace TestInject
 						$"mov byte ptr [0x{BaseAddress.ToInt32() + 51:X8}], dl",
 
 						"push [esp]",
-						$"pop dword ptr [0x{BaseAddress.ToInt32() + 52:X8}]"
+						$"pop dword ptr [0x{BaseAddress.ToInt32() + 52:X8}]" // EIP?
 					}, true, out byte[] assembled);
 
 					if (assembleResult)
@@ -1270,7 +1662,7 @@ namespace TestInject
 				{
 					string ret = "";
 
-					ret += $"\nEIP: 0x{EIP:X8} ({EIP})\n";
+					ret += $"EIP: 0x{EIP:X8} ({EIP})\n";
 					ret += $"EFLAGS: 0x{EFLAGS:X8} ({EFLAGS})\n";
 
 					ret += $"EAX: 0x{EAX:X8} ({EAX})\n";
@@ -1297,7 +1689,7 @@ namespace TestInject
 					ret += $"CL: 0x{CL:X} ({CL})\n";
 
 					ret += $"DH: 0x{DH:X} ({DH})\n";
-					ret += $"DL: 0x{DL:X} ({DL})\n";
+					ret += $"DL: 0x{DL:X} ({DL})";
 					return ret;
 				}
 			}
@@ -1798,6 +2190,9 @@ namespace TestInject
 			[DllImport("kernel32", CharSet = CharSet.Ansi, ExactSpelling = true, SetLastError = true)]
 			public static extern IntPtr GetProcAddress(IntPtr hModule, string procName);
 
+			[DllImport("kernel32", SetLastError = true, CharSet = CharSet.Ansi)]
+			public static extern IntPtr LoadLibrary([MarshalAs(UnmanagedType.LPStr)]string lpFileName);
+
 			[DllImport("kernel32.dll", SetLastError = true)]
 
 			internal static extern void GetSystemInfo(ref Structures.SYSTEM_INFO Info);
@@ -1865,6 +2260,8 @@ namespace TestInject
 			public static extern bool HeapFree(IntPtr hHeap, uint dwFlags, IntPtr lpMem);
 		}
 	}
+
+
 
 	public class DebugConsole
 	{
@@ -1981,7 +2378,7 @@ namespace TestInject
 
 		}
 
-		public static uint CalculateRelativeAddressForJmp(uint from, uint to)
+		public static uint RelAddr(uint from, uint to)
 			=> to - from - 5;
 
 		public static unsafe long FindPattern(byte* body, int bodyLength, byte[] pattern, byte[] masks, long start = 0)
@@ -2060,10 +2457,10 @@ namespace TestInject
 			return ret;
 		}
 
-		public static byte[] FromHexIDA(this byte[] destination, string IStyleHexString)
+		public static void FromHexIDA(ref byte[] destination, string IStyleHexString)
 		{
 			if (string.IsNullOrEmpty(IStyleHexString))
-				return null;
+				return;
 			// Expects CE styled string array
 
 			string[] split = IStyleHexString.TrimStart().TrimEnd().Split(new [] { "\\x" }, StringSplitOptions.None);
@@ -2074,8 +2471,7 @@ namespace TestInject
 				ret[n] = Convert.ToByte(split[n], 16);
 			}
 
-
-			return ret;
+			destination = ret;
 		}
 
 		public static string ByteArrayToHexString(this byte[] obj, bool CEStyleString = true)
