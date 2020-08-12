@@ -17,6 +17,8 @@ using System.Security;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
+using System.Web;
+using System.Windows.Forms;
 using static TestInject.HelperMethods;
 
 namespace TestInject
@@ -630,19 +632,18 @@ namespace TestInject
 
 			public unsafe class BasicHook<T> where T : Delegate
 			{
-				public bool bIsInstalled;
+				public bool IsInstalled;
 
-				public readonly IntPtr dwInstallAddress;
+				public readonly IntPtr InstalledAt;
 				private readonly IntPtr dwRegistersBaseAddress;
 				public readonly Structures.RegisterStates Registers;
 
-				public T CleanOriginal { get; private set; }
+				public T Original { get; private set; }
 				private GCHandle _cleanOriginalHandle;
 
 				private readonly int _overwriteCount;
 				
 				private readonly Delegate _hkMethod;
-				private readonly GCHandle _hkMethodHandle;
 				private readonly IntPtr _hkMethodAddress;
 
 				private readonly byte[] _origBytes;
@@ -653,32 +654,37 @@ namespace TestInject
 					if (installLocation == IntPtr.Zero || byteOverwriteCount < 5)
 						throw new Exception("ERROR");
 
-					dwInstallAddress = installLocation;
+					InstalledAt = installLocation;
 					_overwriteCount = byteOverwriteCount;
-					_origBytes = Reader.ReadBytes(dwInstallAddress, (uint) _overwriteCount);
+					_origBytes = Reader.ReadBytes(InstalledAt, (uint) _overwriteCount);
 
 					Registers = new Structures.RegisterStates();
+
 					Registers.GeneratePushAd(true);
 					Registers.GeneratePushFd(true);
+
 					Registers.GeneratePopAd(true);
 					Registers.GeneratePopFd(true);
 					dwRegistersBaseAddress = Registers.BaseAddress;
 
 					_hkMethod = hkMethod;
-					_hkMethodHandle = GCHandle.Alloc(_hkMethod, GCHandleType.Normal);
 					_hkMethodAddress = Marshal.GetFunctionPointerForDelegate(_hkMethod);
 
-					_middleman = Allocator.Unmanaged.Allocate(0x10000);
+					_middleman = Allocator.Managed.ManagedAllocate(12, Enums.MemoryProtection.ExecuteReadWrite);
 					if (_middleman == IntPtr.Zero)
-						throw new Exception("ERROR");
+					{
+						_middleman = Allocator.Unmanaged.Allocate(12);
+						if (_middleman == IntPtr.Zero)
+							throw new Exception($"Allocation for middleman region failed");
+					}
 
-					CleanOriginal = Marshal.GetDelegateForFunctionPointer<T>(dwInstallAddress);
-					_cleanOriginalHandle = GCHandle.Alloc(CleanOriginal, GCHandleType.Normal);
+					Original = Marshal.GetDelegateForFunctionPointer<T>(InstalledAt);
+					_cleanOriginalHandle = GCHandle.Alloc(Original, GCHandleType.Normal);
 				}
 
 				public void Install()
 				{
-					if (bIsInstalled)
+					if (IsInstalled)
 						return;
 
 					int offset = 0;
@@ -699,18 +705,18 @@ namespace TestInject
 
 					*(byte*) (clean + offset) = 0xE9;
 					offset++;
-					*(uint*) (clean + offset) = RelAddr((uint) (clean + (offset - 1)), (uint) (dwInstallAddress +  _overwriteCount));
+					*(uint*) (clean + offset) = RelAddr((uint) (clean + (offset - 1)), (uint) (InstalledAt +  _overwriteCount));
 
 					offset += 4;
 					*(byte*) (clean + offset) = 0xC3;
 					offset += 1;
 
 					Protection.SetPageProtection(clean, _origBytes.Length + 5, Enums.MemoryProtection.ExecuteRead, out _);
-					CleanOriginal = Marshal.GetDelegateForFunctionPointer<T>(clean);
+					Original = Marshal.GetDelegateForFunctionPointer<T>(clean);
 					if (_cleanOriginalHandle.IsAllocated)
 						_cleanOriginalHandle.Free();
 
-					_cleanOriginalHandle = GCHandle.Alloc(CleanOriginal, GCHandleType.Normal);
+					_cleanOriginalHandle = GCHandle.Alloc(Original, GCHandleType.Normal);
 					Console.WriteLine($"Clean Function Address: 0x{clean.ToInt32():X8}");
 					offset = 0;
 					#endregion
@@ -756,25 +762,29 @@ namespace TestInject
 					offset += Registers.PopFdBytes.Length;
 
 					Writer.WriteBytes(_middleman + offset, new byte[] { 0xC3 });
-					offset += 1;
+					//MessageBox.Show($"Middleman Size: {(offset + 1)} bytes");
 
 					offset = 0;
 					Console.WriteLine($"Middleman: 0x{_middleman.ToInt32():X8}");
 
-					Protection.SetPageProtection(dwInstallAddress, _overwriteCount, Enums.MemoryProtection.ExecuteReadWrite, out var old);
-					*(byte*) (dwInstallAddress) = 0xE9;
-					*(uint*) (dwInstallAddress + 1) = RelAddr((uint)dwInstallAddress, (uint) (_middleman));
+					Protection.SetPageProtection(InstalledAt, _overwriteCount, Enums.MemoryProtection.ExecuteReadWrite, out var old);
+					*(byte*) (InstalledAt) = 0xE9;
+					*(uint*) (InstalledAt + 1) = RelAddr((uint)InstalledAt, (uint) (_middleman));
 
 					offset += 5;
 
 					for (int n = 0; n < _overwriteCount - 5; n++)
-						*(byte*)(dwInstallAddress + (offset + n)) = 0x90;
+						*(byte*)(InstalledAt + (offset + n)) = 0x90;
 
-					Protection.SetPageProtection(dwInstallAddress, _overwriteCount, old, out _);
+					Protection.SetPageProtection(InstalledAt, _overwriteCount, old, out _);
 
-					bIsInstalled = true;
+					IsInstalled = true;
 				}
 
+				public void Uninstall()
+				{
+					throw new NotImplementedException($"Unhooking is not implemented");
+				}
 			}
 
 			public unsafe class Hk<T>
@@ -808,7 +818,7 @@ namespace TestInject
 
 					Stopwatch ts = v ? Stopwatch.StartNew() : null;
 					if (InstallLocation == 0)
-						throw new InvalidOperationException($"Parameter 'InstallLocation' cannot be 0");
+						throw new InvalidOperationException($"Parameter 'InstallLocation' cannot be zero");
 
 					if (PrologueByteLengthOverwrite < 5)
 						throw new InvalidOperationException($"Parameter 'PrologueByteLengthOverwrite' cannot be less than 5 bytes");
@@ -936,6 +946,73 @@ namespace TestInject
 					Protection.SetPageProtection(new IntPtr(InstalledAt), (int)numBytes, old, out _);
 
 					backingIsInstalled = false;
+				}
+			}
+
+
+			public unsafe class HookEx<TDelegate>
+			{
+				private readonly IntPtr _target;
+				private readonly int _len;
+
+				private readonly Delegate _hook;
+				private readonly IntPtr _hookAddress;
+
+				private readonly Structures.RegisterStates _reg;
+
+				public TDelegate Original { get; private set; }
+				public bool IsInstalled { get; private set; } = false;
+
+				public HookEx(IntPtr target, Delegate hook, int length)
+				{
+					if (target == IntPtr.Zero || hook == null || length < 5)
+						throw new InvalidOperationException();
+
+					_target = target;
+					_len = length;
+					_hook = hook;
+					_hookAddress = Marshal.GetFunctionPointerForDelegate(_hook);
+
+					Original = Marshal.GetDelegateForFunctionPointer<TDelegate>(target);
+
+					_reg = new Structures.RegisterStates();
+				}
+
+				public bool Install()
+				{
+					if (!Protection.SetPageProtection(_target, _len, Enums.MemoryProtection.ExecuteReadWrite, out var old))
+					{
+						Console.WriteLine($"Failed setting to RWX");
+						return false;
+					}
+
+					List<byte> overwrittenBytes = new List<byte>();
+					for (int i = 0; i < _len; i++)
+					{
+						overwrittenBytes.Add(*(byte*)(_target.ToInt32() + i));
+						*(byte*) (_target.ToInt32() + i) = 0x90;
+					}
+
+					*(byte*) (_target.ToInt32()) = 0xE9;
+					*(uint*)(_target.ToInt32() + 1) = RelAddr((uint)_target.ToInt32(), (uint)_hookAddress);
+
+					IntPtr origFunction = Allocator.Managed.ManagedAllocate(overwrittenBytes.Count + 5);
+					if (origFunction == IntPtr.Zero)
+						return false;
+
+					for (var i = 0; i < overwrittenBytes.Count; i++)
+						*(byte*)(origFunction.ToInt32() + i) = overwrittenBytes[i];
+
+					int offset = overwrittenBytes.Count;
+					*(byte*) (origFunction.ToInt32() + offset) = 0xE9;
+					offset++;
+					*(uint*)(origFunction.ToInt32() + offset) = RelAddr((uint)origFunction.ToInt32(), (uint)(_target.ToInt32() + _len));
+					Original = Marshal.GetDelegateForFunctionPointer<TDelegate>(origFunction);
+
+					Protection.SetPageProtection(_target, _len, old, out _);
+
+					IsInstalled = true;
+					return true;
 				}
 			}
 		}
@@ -1153,71 +1230,54 @@ namespace TestInject
 
 		public class Assembler
 		{
-			public static bool AssembleMnemonics(string[] assemblycode, bool isX86, out byte[] assembled)
+			public static bool AssembleMnemonics(string[] assemblyCode, bool isx86, out byte[] assembled)
 			{
-				if (assemblycode == null || assemblycode.Length < 1) throw new Exception("bla bla bla shit went wrong");
-				
-				var request = (HttpWebRequest)WebRequest.Create("https://defuse.ca/online-x86-assembler.htm");
-
-				var postData = $"instructions={string.Join("\n", assemblycode)}";
-				postData += $"&arch={(isX86 ? "x86" : "x64")}";
-				postData += "&submit=Assemble";
-
-				var data = Encoding.UTF8.GetBytes(postData);
-
-				request.Method = "POST";
-				request.Credentials = CredentialCache.DefaultCredentials;
-				request.Accept = "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.9";
-				request.UserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/80.0.3987.122 Safari/537.3";
-				request.Referer = "https://defuse.ca/online-x86-assembler.htm";
-				request.ContentType = "application/x-www-form-urlencoded";
-				request.ContentLength = data.Length;
-				request.CachePolicy = new RequestCachePolicy(RequestCacheLevel.NoCacheNoStore);
-				request.Host = "defuse.ca";
-				request.KeepAlive = true;
-				request.AutomaticDecompression = DecompressionMethods.Deflate | DecompressionMethods.GZip;
-
-				request.Headers.Add("Upgrade-Insecure-Requests", @"1");
-				request.Headers.Add("DNT", @"1");
-				request.Headers.Add("Origin", "https://defuse.ca");
-
-				request.Headers.Set(HttpRequestHeader.AcceptEncoding, "gzip, deflate, br");
-				request.Headers.Set(HttpRequestHeader.AcceptLanguage, "en-SE,en;q=0.9,sv-SE;q=0.8,sv;q=0.7,en-US;q=0.6");
-
-				using (var stream = request.GetRequestStream())
-				{
-					stream.Write(data, 0, data.Length);
-				}
-
-				var response = (HttpWebResponse)request.GetResponse();
-				var responseString = new StreamReader(response.GetResponseStream() ?? throw new InvalidOperationException("ResponseStream was null!")).ReadToEnd();
-
 				try
 				{
-					int startIdx = responseString.IndexOf("{ ", StringComparison.Ordinal);
-					int endIdx = responseString.IndexOf(" }                </p>", StringComparison.Ordinal);
-					string extracted = responseString.Substring(startIdx + 2, endIdx - startIdx - 2);
-					string[] arr = extracted.Split(',');
-
-					List<byte> ret = new List<byte>();
-					foreach (string strByte in arr)
+					if (assemblyCode == null || assemblyCode.Length < 1)
 					{
-						ret.Add(Convert.ToByte(strByte.Replace(" ", string.Empty), 16));
+						assembled = null;
+						return false;
 					}
 
-					assembled = ret.ToArray();
-					return response.StatusCode == HttpStatusCode.OK && responseString.Contains("Array Literal") && assembled.Length > 0;
+					string instructions = HttpUtility.UrlEncode(string.Join("\\n", assemblyCode), Encoding.UTF8);
+					string url = $"http://shell-storm.org/online/Online-Assembler-and-Disassembler/?inst={instructions}&arch={(isx86 ? "x86-32" : "x86-64")}&as_format=inline";
+
+					WebClient req = new WebClient();
+					string body = req.DownloadString(url);
+
+					int start = body.IndexOf("<pre>");
+					if (start == -1)
+					{
+						assembled = null;
+						return false;
+					}
+
+					int end = body.IndexOf("</pre>");
+					if (end == -1)
+					{
+						assembled = null;
+						return false;
+					}
+
+					string extractedText = new string(body.Skip(start + 5).Take((end - 5) - start).ToArray());
+					extractedText = extractedText.Trim('"');
+
+					var bytes = extractedText.Split(new[] {"\\x"}, StringSplitOptions.None);
+					List<byte> returnList = new List<byte>();
+
+					foreach (var b in bytes)
+					{
+						bool result = byte.TryParse(b, NumberStyles.HexNumber, CultureInfo.InvariantCulture, out byte parsed);
+						if (result)
+							returnList.Add(parsed);
+					}
+
+					assembled = returnList.ToArray();
+					return true;
 				}
-				catch
+				catch (Exception)
 				{
-					if (responseString.Contains("Error:")) {
-						// Parse out error code
-						string errorText = responseString.Substring(
-							responseString.IndexOf("Error: "),
-							responseString.IndexOf("</div>"));
-
-						throw new Exception(errorText);
-					}
 					assembled = null;
 					return false;
 				}

@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Collections;
 using System.Diagnostics;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Threading;
 using System.Windows.Forms;
@@ -12,15 +13,17 @@ namespace TestInject
 {
 	public class MyLibrary
 	{
-		[UnmanagedFunctionPointer(CallingConvention.StdCall)]
+		[UnmanagedFunctionPointer(CallingConvention.Cdecl)]
 		public delegate int GetPlayerInCrosshair();
 
-		[UnmanagedFunctionPointer(CallingConvention.StdCall)]
-		public delegate int SDLSwapBuffers();
+		[UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+		public delegate void TraceLine(float fX, float fY, float fZ,
+			float tX, float tY, float tZ, IntPtr localplayer, bool bCheckPlayers, bool bSkipTags);
+		
 
-		public static Detours.Hk<SDLSwapBuffers> SwapBuffersHK;
+		public static Detours.HookEx<GetPlayerInCrosshair> MyHk;
 
-		public static Detours.Hk<GetPlayerInCrosshair> MyHk;
+		public static Detours.BasicHook<GetPlayerInCrosshair> MyHook;
 
 		[DllExport("DllMain", CallingConvention.Cdecl)]
 		public static void EntryPoint()
@@ -34,10 +37,6 @@ namespace TestInject
 					"Debugging Console Exception",
 					MessageBoxButtons.OK,
 					MessageBoxIcon.Error);
-
-			var al = Allocator.Managed.ManagedAllocate(12, Enums.MemoryProtection.ExecuteReadWrite);
-			Console.WriteLine($"Managed Allocatio Base: 0x{al.ToInt32():X8}");
-			Console.ReadLine();
 
 			//new Thread(() => new Overlay("Counter-Strike: Global Offensive").ShowDialog()).Start();
 
@@ -54,28 +53,27 @@ namespace TestInject
 				Console.WriteLine("Failed SDLSwapBuffers");
 			*/
 
+			//MyHk = new Detours.HookEx<GetPlayerInCrosshair>(
+			//	GetPlayerInCrosshairFunction,
+			//	del,
+			//	6);
 
-			/*
-			Console.WriteLine("Preparing to hook @ 0x004607C0");
-			MyHk = new Detours.Hk<GetPlayerInCrosshair>(0x004607C0, HkGetPlayerInCrosshair, 6, true);
-			if (!MyHk.IsInstalled)
-				MyHk.Install();
-			Console.WriteLine("Done installing hook @ 0x004607C0");
-			*/
+			//MyHk.Install();
+
+			GetPlayerInCrosshair hookDelegate = HkGetPlayerInCrosshair;
+			IntPtr GetPlayerInCrosshairFunction = new IntPtr(0x004607C0); // GetPlayerInCrosshair
+
+			MyHook = new Detours.BasicHook<GetPlayerInCrosshair>(GetPlayerInCrosshairFunction, hookDelegate,
+				6);
+			MyHook.Install();
 		}
 
-		public static int HkSDLSwapBuffers()
+		[MethodImpl(MethodImplOptions.NoInlining | MethodImplOptions.NoOptimization)]
+		public static unsafe int HkGetPlayerInCrosshair()
 		{
-			Console.WriteLine($"[{DateTime.Now.ToLongTimeString()}] Inside Hook");
-
-			return MyHk.ContinueExecution();
-		}
-
-		public static int HkGetPlayerInCrosshair()
-		{
-			Console.WriteLine($"[{DateTime.Now.ToLongTimeString()}] Inside Hook");
-
-			return MyHk.ContinueExecution();
+			Console.WriteLine($"[{DateTime.Now.ToLongTimeString()}] Hallo we're in managed code in a unmanaged executable :33");
+			
+			return MyHook.Original();
 		}
 
 		public static unsafe void MyCallbackMethod(IntPtr registerPtr)
