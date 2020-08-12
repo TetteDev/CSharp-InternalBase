@@ -66,9 +66,6 @@ namespace TestInject
 		public static Brush Red = new SolidBrush(Color.Red);
 		public new static Font Font = new Font(FontFamily.GenericSerif, 16f, FontStyle.Bold);
 
-		public static Delegates.EndSceneDelegate endScene;
-		public static HookObj<Delegates.EndSceneDelegate> endSceneHook;
-
 		public static GMenu _menu;
 
 		public Overlay(IntPtr targetWindowHandle)

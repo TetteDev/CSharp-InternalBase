@@ -38,8 +38,6 @@ namespace TestInject
 					MessageBoxButtons.OK,
 					MessageBoxIcon.Error);
 
-			//new Thread(() => new Overlay("Counter-Strike: Global Offensive").ShowDialog()).Start();
-
 			/*
 			IntPtr mod = Modules.GetModuleBaseAddress("SDL.dll");
 			uint oSDLSwapBuffers = (uint)PInvoke.GetProcAddress(mod, "SDL_GL_SwapBuffers");
@@ -66,6 +64,8 @@ namespace TestInject
 			MyHook = new Detours.BasicHook<GetPlayerInCrosshair>(GetPlayerInCrosshairFunction, hookDelegate,
 				6);
 			MyHook.Install();
+
+			new Thread(() => new Overlay("Counter-Strike: Global Offensive").ShowDialog()).Start();
 		}
 
 		[MethodImpl(MethodImplOptions.NoInlining | MethodImplOptions.NoOptimization)]
