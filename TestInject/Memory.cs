@@ -158,109 +158,111 @@ namespace TestInject
 					X86DisassembleMode disassmMode =
 						IntPtr.Size == 4 ? X86DisassembleMode.Bit32 : X86DisassembleMode.Bit64;
 
-					using CapstoneX86Disassembler disassm = CapstoneDisassembler.CreateX86Disassembler(disassmMode);
-
-					List<byte> detourShellcode =
-						GetDetourBytes(
-							hookAddress,
-							function,
-							disassmMode == X86DisassembleMode.Bit32).ToList();
-
-					int minLength = detourShellcode.Count;
-					int offset = 0;
-
-					byte[] functionBytes = new byte[minLength];
-					fixed (void* dest = functionBytes)
-						Unsafe.CopyBlockUnaligned(dest, function, (uint)minLength);
-
-					X86Instruction[] dissasembly = disassm.Disassemble(functionBytes, (long)function, minLength);
-
-					while (dissasembly == null
-						   || dissasembly.Length < 1
-						   || dissasembly.Sum(ln => ln.Bytes.Length) < detourShellcode.Count)
+					//using CapstoneX86Disassembler disassm = CapstoneDisassembler.CreateX86Disassembler(disassmMode);
+					using (CapstoneX86Disassembler disassm = CapstoneDisassembler.CreateX86Disassembler(disassmMode))
 					{
-						offset++;
-						Array.Resize(ref functionBytes, functionBytes.Length + 1);
+						List<byte> detourShellcode =
+												GetDetourBytes(
+													hookAddress,
+													function,
+													disassmMode == X86DisassembleMode.Bit32).ToList();
 
+						int minLength = detourShellcode.Count;
+						int offset = 0;
+
+						byte[] functionBytes = new byte[minLength];
 						fixed (void* dest = functionBytes)
-							Unsafe.CopyBlockUnaligned(dest, function, (uint)(minLength + offset));
+							Unsafe.CopyBlockUnaligned(dest, function, (uint)minLength);
 
-						dissasembly = disassm.Disassemble(functionBytes, (long)function, minLength + offset);
+						X86Instruction[] dissasembly = disassm.Disassemble(functionBytes, (long)function, minLength);
+
+						while (dissasembly == null
+							   || dissasembly.Length < 1
+							   || dissasembly.Sum(ln => ln.Bytes.Length) < detourShellcode.Count)
+						{
+							offset++;
+							Array.Resize(ref functionBytes, functionBytes.Length + 1);
+
+							fixed (void* dest = functionBytes)
+								Unsafe.CopyBlockUnaligned(dest, function, (uint)(minLength + offset));
+
+							dissasembly = disassm.Disassemble(functionBytes, (long)function, minLength + offset);
+						}
+
+						if (dissasembly[dissasembly.Length - 1].Bytes.Length == 1
+							&& dissasembly[dissasembly.Length - 1].Bytes[0] == 0xC3
+							&& dissasembly.Sum(ln => ln.Bytes.Length) < detourShellcode.Count)
+						{
+
+							Debug.WriteLine($"Function reached end before getting enough bytes ({detourShellcode.Count}) to work with");
+							original = null;
+							return false;
+						}
+
+						int nopCount = dissasembly.Sum(ln => ln.Bytes.Length) - detourShellcode.Count;
+						if (nopCount > 0) detourShellcode.AddRange(Enumerable.Range(0, nopCount).Select(b => (byte)0x90));
+
+						List<byte> originalFunctionBytes = dissasembly.SelectMany(ln => ln.Bytes).ToList();
+						originalFunctionBytes.AddRange(
+							disassmMode == X86DisassembleMode.Bit32
+								? Assembler.AssembleAsync(new[] { $"push 0x{(int)function + detourShellcode.Count + nopCount:X}", "ret" }, Enums.AssembleType.X86_32).GetAwaiter().GetResult()
+								: Assembler.AssembleAsync(new[] { "jmp qword ptr [rip]" }, Enums.AssembleType.X86_64).GetAwaiter().GetResult());
+
+						if (disassmMode == X86DisassembleMode.Bit64) // writing the qword as data for the 64bit [rip] jmp
+							originalFunctionBytes.AddRange(BitConverter.GetBytes((long)function + detourShellcode.Count + nopCount));
+
+
+						void* originalFunctionAllocation = Marshal.AllocHGlobal(originalFunctionBytes.Count).ToPointer();
+						if (originalFunctionAllocation == null)
+						{
+							Debug.WriteLine("Failed to allocate for original function body");
+							original = null;
+							return false;
+						}
+
+						// Change protection of our allocated region to EXECUTE_READ_WRITE
+						if (!PInvoke.VirtualProtect(
+							(IntPtr)originalFunctionAllocation,
+							originalFunctionBytes.Count,
+							Enums.MemoryProtection.ExecuteReadWrite,
+							out _))
+						{
+							Marshal.FreeHGlobal((IntPtr)originalFunctionAllocation);
+
+							original = null;
+							return false;
+						}
+
+						fixed (void* src = originalFunctionBytes.ToArray())
+							Unsafe.CopyBlockUnaligned(originalFunctionAllocation, src, (uint)originalFunctionBytes.Count);
+
+						if (!PInvoke.VirtualProtect(
+							new IntPtr(function),
+							functionBytes.Length,
+							Enums.MemoryProtection.ExecuteReadWrite /* RWX */,
+							out Enums.MemoryProtection oldProtect))
+						{
+							Marshal.FreeHGlobal((IntPtr)originalFunctionAllocation);
+
+							original = null;
+							return false;
+						}
+
+						fixed (void* src = detourShellcode.ToArray())
+							Unsafe.CopyBlockUnaligned(function, src, (uint)detourShellcode.Count);
+
+						if (!PInvoke.VirtualProtect(
+							new IntPtr(function),
+							functionBytes.Length,
+							oldProtect,
+							out _))
+						{
+							Debug.WriteLine($"Failed restoring protection for 0x{(long)function:X8}");
+						}
+
+						original = Marshal.GetDelegateForFunctionPointer<TDelegate>((IntPtr)originalFunctionAllocation);
+						return original != null;
 					}
-
-					if (dissasembly[dissasembly.Length - 1].Bytes.Length == 1
-						&& dissasembly[dissasembly.Length - 1].Bytes[0] == 0xC3
-						&& dissasembly.Sum(ln => ln.Bytes.Length) < detourShellcode.Count)
-					{
-
-						Debug.WriteLine($"Function reached end before getting enough bytes ({detourShellcode.Count}) to work with");
-						original = null;
-						return false;
-					}
-
-					int nopCount = dissasembly.Sum(ln => ln.Bytes.Length) - detourShellcode.Count;
-					if (nopCount > 0) detourShellcode.AddRange(Enumerable.Range(0, nopCount).Select(b => (byte)0x90));
-
-					List<byte> originalFunctionBytes = dissasembly.SelectMany(ln => ln.Bytes).ToList();
-					originalFunctionBytes.AddRange(
-						disassmMode == X86DisassembleMode.Bit32
-							? Assembler.AssembleAsync(new[] { $"push 0x{(int)function + detourShellcode.Count + nopCount:X}", "ret" }, Enums.AssembleType.X86_32).GetAwaiter().GetResult()
-							: Assembler.AssembleAsync(new[] { "jmp qword ptr [rip]" }, Enums.AssembleType.X86_64).GetAwaiter().GetResult());
-
-					if (disassmMode == X86DisassembleMode.Bit64) // writing the qword as data for the 64bit [rip] jmp
-						originalFunctionBytes.AddRange(BitConverter.GetBytes((long)function + detourShellcode.Count + nopCount));
-
-
-					void* originalFunctionAllocation = Marshal.AllocHGlobal(originalFunctionBytes.Count).ToPointer();
-					if (originalFunctionAllocation == null)
-					{
-						Debug.WriteLine("Failed to allocate for original function body");
-						original = null;
-						return false;
-					}
-
-					// Change protection of our allocated region to EXECUTE_READ_WRITE
-					if (!PInvoke.VirtualProtect(
-						(IntPtr)originalFunctionAllocation,
-						originalFunctionBytes.Count,
-						Enums.MemoryProtection.ExecuteReadWrite,
-						out _))
-					{
-						Marshal.FreeHGlobal((IntPtr)originalFunctionAllocation);
-
-						original = null;
-						return false;
-					}
-
-					fixed (void* src = originalFunctionBytes.ToArray())
-						Unsafe.CopyBlockUnaligned(originalFunctionAllocation, src, (uint)originalFunctionBytes.Count);
-
-					if (!PInvoke.VirtualProtect(
-						new IntPtr(function),
-						functionBytes.Length,
-						Enums.MemoryProtection.ExecuteReadWrite /* RWX */,
-						out Enums.MemoryProtection oldProtect))
-					{
-						Marshal.FreeHGlobal((IntPtr)originalFunctionAllocation);
-
-						original = null;
-						return false;
-					}
-
-					fixed (void* src = detourShellcode.ToArray())
-						Unsafe.CopyBlockUnaligned(function, src, (uint)detourShellcode.Count);
-
-					if (!PInvoke.VirtualProtect(
-						new IntPtr(function),
-						functionBytes.Length,
-						oldProtect,
-						out _))
-					{
-						Debug.WriteLine($"Failed restoring protection for 0x{(long)function:X8}");
-					}
-
-					original = Marshal.GetDelegateForFunctionPointer<TDelegate>((IntPtr)originalFunctionAllocation);
-					return original != null;
 				}
 			}
 		}
@@ -342,7 +344,7 @@ namespace TestInject
 				return 0;
 			}
 
-			public static unsafe List<long> FindPattern(string pattern, string? optionalModuleName, bool readable, bool writable, bool executable)
+			public static unsafe List<long> FindPattern(string pattern, string optionalModuleName, bool readable, bool writable, bool executable)
 			{
 				#region Creation of Byte Array from string pattern
 				var tmpSplitPattern = pattern.TrimStart(' ').TrimEnd(' ').Split(' ');
@@ -487,37 +489,45 @@ namespace TestInject
 
 				string encodedMnemonics = HttpUtility.UrlEncode(string.Join("\n", mnemonics));
 				string type = TranslateAssembleType(assembleType);
+				if (type.Equals("error", StringComparison.OrdinalIgnoreCase))
+					return null;
+
 				string requestUrl = $"http://shell-storm.org/online/Online-Assembler-and-Disassembler/?inst={encodedMnemonics}&arch={type}&as_format=inline";
 
-				using HttpClient req = new HttpClient();
-				string responseBody = await req.GetStringAsync(requestUrl).ConfigureAwait(false);
+				using (HttpClient req = new HttpClient())
+				{
+					string responseBody = await req.GetStringAsync(requestUrl).ConfigureAwait(false);
 
-				if (string.IsNullOrEmpty(responseBody))
-					return null;
+					if (string.IsNullOrEmpty(responseBody))
+						return null;
 
-				HtmlDocument doc = new HtmlDocument();
-				doc.LoadHtml(responseBody);
-				var nodes = doc.DocumentNode.SelectNodes(".//pre");
-				if (nodes == null || nodes.Count < 1)
-					return null;
+					HtmlDocument doc = new HtmlDocument();
+					doc.LoadHtml(responseBody);
+					var nodes = doc.DocumentNode.SelectNodes(".//pre");
+					if (nodes == null || nodes.Count < 1)
+						return null;
 
-				string bytesString = nodes[0].InnerText;
-				if (bytesString.Equals("Invalid instruction(s)", StringComparison.InvariantCultureIgnoreCase))
-					return null;
+					string bytesString = nodes[0].InnerText;
+					if (bytesString.Equals("Invalid instruction(s)", StringComparison.InvariantCultureIgnoreCase))
+						return null;
 
-				bytesString = bytesString.Trim('"');
-				string[] bytesStringArray = bytesString.Split(new[] { "\\x" }, StringSplitOptions.RemoveEmptyEntries);
+					bytesString = bytesString.Trim('"');
+					string[] bytesStringArray = bytesString.Split(new[] { "\\x" }, StringSplitOptions.RemoveEmptyEntries);
 
-				return bytesStringArray.Select(strByte => byte.Parse(strByte, NumberStyles.HexNumber)).ToArray();
+					return bytesStringArray.Select(strByte => byte.Parse(strByte, NumberStyles.HexNumber)).ToArray();
+				}
+				
 			}
 
 			public static X86Instruction[] Dissasemble(byte[] buffer, X86DisassembleMode disassmMode = X86DisassembleMode.Bit32, long startingAddress = 0L)
 			{
 				if (buffer == null || buffer.Length < 1)
 					return null;
-				using CapstoneX86Disassembler disassm = CapstoneDisassembler.CreateX86Disassembler(disassmMode);
 
-				return disassm.Disassemble(buffer, startingAddress);
+				using (CapstoneX86Disassembler disassm = CapstoneDisassembler.CreateX86Disassembler(disassmMode))
+				{
+					return disassm.Disassemble(buffer, startingAddress);
+				}
 			}
 		}
 
@@ -1394,21 +1404,18 @@ namespace TestInject
 	{
 		public static string TranslateAssembleType(Memory.Enums.AssembleType type)
 		{
-			return type switch
+			switch (type)
 			{
-				Memory.Enums.AssembleType.X86_16 => "x86-16",
-				Memory.Enums.AssembleType.X86_32 => "x86-32",
-				Memory.Enums.AssembleType.X86_64 => "x86-64",
-				Memory.Enums.AssembleType.ARM => "arm",
-				Memory.Enums.AssembleType.ArmThumb => "arm-t",
-				Memory.Enums.AssembleType.AArch64 => "arm64",
-				Memory.Enums.AssembleType.Mips32 => "mips32",
-				Memory.Enums.AssembleType.Mips64 => "mips64",
-				Memory.Enums.AssembleType.PowerPC32 => "ppc32",
-				Memory.Enums.AssembleType.PowerPC64 => "ppc64",
-				Memory.Enums.AssembleType.Sparc => "sparc",
-				_ => "error"
-			};
+				case Memory.Enums.AssembleType.X86_16:
+					return "x86-16";
+				case Memory.Enums.AssembleType.X86_32:
+					return "x86-32";
+				case Memory.Enums.AssembleType.X86_64:
+					return "x86-64";
+				default:
+					return "error";
+
+			}
 		}
 
 

@@ -16,7 +16,6 @@ namespace TestInject
 		public static unsafe void EntryPoint()
 		{
 			PatchEtw(true);
-
 			UpdateProcessInformation();
 			AppDomain.CurrentDomain.UnhandledException += CurrentDomain_UnhandledException;
 			
@@ -103,7 +102,7 @@ namespace TestInject
 						{
 							if (offsetItterator >= stopThreshold)
 							{
-								Console.WriteLine("PatchETW (64bit) itterated over 120 bytes without stopping, exiting from function ...");
+								if (verbose) Console.WriteLine("PatchETW (64bit) itterated over 120 bytes without stopping, exiting from function ...");
 								return false;
 							}
 
@@ -137,8 +136,8 @@ namespace TestInject
 				}
 
 				bool restore = Protection.SetPageProtection(etwEventWrite, 3, oldProtection, out _);
-				if (!restore)
-					Debug.WriteLine("Restoring of protection for EtwEventWrite failed");
+				if (!restore && verbose)
+					Console.WriteLine("Restoring of protection for EtwEventWrite failed");
 
 				if (verbose) Console.WriteLine("EtwEventWrite has been patched successfully");
 				return true;
